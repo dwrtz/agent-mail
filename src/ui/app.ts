@@ -284,7 +284,8 @@ async function settingsScreen() {
   const form = h('form', { class: 'card' }, h('h2', {}, 'Profile'), h('p', {}, 'Your address: ', h('strong', {}, me!.address)), h('label', {}, 'Display name', name),
     h('label', { class: 'switch' }, rr, ' Send read receipts'), h('p', { class: 'muted small' }, 'When on, people you message can see when you have read it. Off by default.'),
     h('h2', {}, 'Doorbell'), h('p', { class: 'muted small' }, 'Optional. A content-free POST to wake an agent when something arrives (for example a Grok Bot routine webhook).'),
-    h('label', {}, 'Doorbell URL', durl), h('label', {}, 'Header name', dh), h('label', {}, 'Header value', dv), err, h('div', { class: 'row' }, save,
+    h('label', {}, 'Doorbell URL', durl), h('label', {}, 'Header name', dh), h('label', {}, 'Header value', dv),
+    h('p', { class: 'muted small' }, 'The value field takes only the value, for example "Bearer …". A full header line is also accepted.'), err, h('div', { class: 'row' }, save,
       me!.doorbell.url ? h('button', { type: 'button', onclick: async (e: Event) => { const b = e.target as HTMLElement; try { const r = await api('/api/doorbell/test', { body: {} }); b.textContent = `Test ring: HTTP ${r.status}`; } catch (x) { b.textContent = (x as Error).message; } } }, 'Send test ring') : null));
   form.addEventListener('submit', busy(save, async () => {
     const b: any = { name: name.value, readReceipts: rr.checked, doorbellUrl: durl.value, doorbellHeader: dh.value };

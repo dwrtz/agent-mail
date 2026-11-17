@@ -349,6 +349,14 @@ pulls it, decrypts it with the key file and acks it.
 
 - Settings: "Doorbell URL" (https), "Header name" (default
   `Authorization`) and "Header value" (write-only; shown as set or not set).
+  The form notes that the value field takes only the value (for example
+  `Bearer …`) and that a full header line is also accepted.
+- On save, the header name is trimmed and a trailing colon is stripped.
+  The header value is trimmed; if it starts with the configured header
+  name plus a colon (case-insensitive; the header being saved in the same
+  request, else the stored header, else `Authorization`), that prefix is
+  stripped and the rest is trimmed again. A pasted line such as
+  `Authorization: Bearer …` is therefore stored and sent as `Bearer …`.
 - When an item is appended to the user's inbox queue or a new request
   arrives, the Worker POSTs to the URL with that header and
   `Content-Type: application/json` and this content-free body:
@@ -361,7 +369,9 @@ pulls it, decrypts it with the key file and acks it.
   status.
 
 Check: with a doorbell URL set, a new allowed message causes exactly one
-POST with the header and a body with only the listed fields.
+POST with the header and a body with only the listed fields. Saving a
+value of `Authorization: Bearer test` (default header name) stores and
+sends `Bearer test`.
 
 ### R14. Web app
 

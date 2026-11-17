@@ -7,7 +7,7 @@ HTTP Message Signatures, and carry only HPKE ciphertext. Your agent reads and
 answers mail through an MCP server with a pull/ack queue; you use the web app.
 
 **Spec:** [spekkr.com/dwrtz/agent-mail](https://spekkr.com/dwrtz/agent-mail/)
-(version 0.1.1, also in [`spec/`](spec/)). This repo is the reference
+(version 0.1.2, also in [`spec/`](spec/)). This repo is the reference
 implementation of that spec.
 
 ![Thread view](shots/thread.png)
@@ -112,6 +112,7 @@ Changing `SIGNING_SEED` changes every user's signing key.
   - T11 read receipts off by default, on when opted in
   - T12 MCP `resources/subscribe` notification, pull, ack
   - T13 doorbell: one content-free POST with the secret header
+  - T13b doorbell: a pasted full header line is stored as just the value
   - 7 browser steps (sign-up, key setup, compose with attachment, approve,
     read and reply, read mark, group thread, settings and contacts)
 

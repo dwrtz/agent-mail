@@ -145,7 +145,7 @@ token. 401 `unauthorized` if neither.
 | GET /api/me | | `{user:{handle,name,email,actor,address,readReceipts,encKeys:[{n,keyId,publicKey}],doorbell:{url,header,valueSet},unread,requests,latestCursor,unreadMessages}}` |
 | PUT /api/keys/encryption | `{publicKey}` (base64url raw X25519) | `{keyId}`; same key twice is a no-op |
 | DELETE /api/keys/encryption/:n | | `{}` (cannot delete the only key or the newest key) |
-| PUT /api/settings | `{name?,readReceipts?,doorbellUrl?,doorbellHeader?,doorbellValue?}` | `{user}` |
+| PUT /api/settings | `{name?,readReceipts?,doorbellUrl?,doorbellHeader?,doorbellValue?}` (header name: trim, strip a trailing colon; header value: trim, strip a leading `<header>:` if present) | `{user}` |
 | POST /api/doorbell/test | | `{status}` |
 | GET /api/tokens, POST /api/tokens, DELETE /api/tokens/:id | `{label}` | `{tokens}` / `{token}` (shown once) / `{}` |
 | POST /api/resolve | `{to:[handle or actor URL]}` | `{actors:[{actor,handle,name,inbox,keyId,publicKey}]}` |
@@ -247,8 +247,10 @@ Settings, with counts) and a top bar on mobile.
   as Allow or Block, remove.
 - **Settings** (`/settings`): your address; display name; "Send read
   receipts" switch; encryption keys (download key file, create new key,
-  remove old keys); doorbell URL, header name, header value, "Send test
-  ring"; connector tokens (create, shown once, revoke) with the MCP URL.
+  remove old keys); doorbell URL, header name, header value (with a note
+  that the value field takes only the value, for example "Bearer …", and
+  that a full header line is also accepted), "Send test ring"; connector
+  tokens (create, shown once, revoke) with the MCP URL.
 
 ## Tests
 
@@ -256,6 +258,7 @@ Settings, with counts) and a top bar on mobile.
   plain Node; no Worker runtime needed).
 - `tests/activity.test.ts`: activity validation (R9 shapes, member caps,
   addressing).
+- `tests/doorbell.test.ts`: doorbell header and value normalization (R13).
 - `e2e/e2e.ts` (`npm run e2e`): builds the UI, starts two `wrangler dev`
   instances (ports 8787 and 8788, separate `--persist-to` dirs,
   `ALLOW_HTTP_LOCALHOST=1`, `TEST_ROUTES=1`), and runs `e2e/suite.ts` then

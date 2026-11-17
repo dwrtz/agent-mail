@@ -7,6 +7,7 @@ import { createToken } from './auth';
 import { signedFetch } from './federation';
 import { b64, b64url, randomBytes, hex, sha256, unb64url } from '../shared/enc';
 import { MAX_ATTACHMENT_BYTES, isUrl } from '../shared/activity';
+import { normalizeDoorbellHeader, normalizeDoorbellValue } from '../shared/doorbell';
 
 export async function meInfo(env: Env, u: UserRow) {
   const actor = actorUrl(env, u.handle);
@@ -82,11 +83,17 @@ export async function ownerApi(req: Request, env: Env, ctx: ExecutionContext, u:
       await env.DB.prepare('UPDATE users SET doorbell_url = ? WHERE id = ?').bind(v || null, u.id).run();
     }
     if (typeof b.doorbellHeader === 'string') {
-      const v = b.doorbellHeader.trim();
+      const v = normalizeDoorbellHeader(b.doorbellHeader);
       if (v && !/^[A-Za-z0-9-]{1,64}$/.test(v)) throw new HttpError(400, 'bad_request', 'header name: letters, digits and dashes');
       await env.DB.prepare('UPDATE users SET doorbell_header = ? WHERE id = ?').bind(v || null, u.id).run();
     }
-    if (typeof b.doorbellValue === 'string') await env.DB.prepare('UPDATE users SET doorbell_value = ? WHERE id = ?').bind(b.doorbellValue || null, u.id).run();
+    if (typeof b.doorbellValue === 'string') {
+      const header = typeof b.doorbellHeader === 'string'
+        ? (normalizeDoorbellHeader(b.doorbellHeader) || 'Authorization')
+        : (u.doorbell_header || 'Authorization');
+      const v = normalizeDoorbellValue(b.doorbellValue, header);
+      await env.DB.prepare('UPDATE users SET doorbell_value = ? WHERE id = ?').bind(v || null, u.id).run();
+    }
     const fresh = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(u.id).first<UserRow>();
     return json({ user: await meInfo(env, fresh!) });
   }

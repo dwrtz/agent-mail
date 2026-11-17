@@ -18,7 +18,7 @@
     "d1",
     "queues"
   ],
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
     "id": "dwrtz",
     "name": "David Wurtz"
@@ -105,6 +105,11 @@
   },
   "lineage": {},
   "changelog": [
+    {
+      "version": "0.1.2",
+      "date": "2026-11-17",
+      "note": "Doorbell settings normalize a pasted full header line (`Authorization: Bearer …`) to just the value, and strip a trailing colon from the header name. The settings form mentions this."
+    },
     {
       "version": "0.1.1",
       "date": "2026-11-17",

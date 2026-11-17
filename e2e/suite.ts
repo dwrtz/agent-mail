@@ -292,6 +292,21 @@ export async function runSuite(c: Ctx): Promise<Result[]> {
     const q = await A.api('/api/queue'); if (q.items.length) await A.api('/api/queue/ack', { body: { upTo: q.nextCursor } });
     return `${all.length} ring(s) for 1 message; body ${all[0].body}; test ring HTTP ${test.status}`;
   });
+
+  await t('T13b', 'Doorbell: a pasted full header line is stored as just the value', async () => {
+    const secret = 'doorbell-line-' + b64(randomBytes(9));
+    await fetch(`${c.sinkBase}/__test/sink`, { method: 'DELETE' });
+    await A.api('/api/settings', { method: 'PUT', body: {
+      doorbellUrl: `${c.sinkBase}/__test/sink?header=x-doorbell-key`,
+      doorbellHeader: 'X-Doorbell-Key:',
+      doorbellValue: `X-Doorbell-Key: ${secret}`,
+    } });
+    const test = await A.api('/api/doorbell/test', { body: {} });
+    const recs: any[] = await waitFor('sink record', async () => { const r: any[] = await (await fetch(`${c.sinkBase}/__test/sink`)).json(); return r.length ? r : null; }, 15000);
+    assert(recs[0].headerSha256 === b64(await sha256(secret)), 'pasted "Header: value" was not stripped before the ring');
+    await A.api('/api/settings', { method: 'PUT', body: { doorbellUrl: '' } });
+    return `test ring HTTP ${test.status}; stored value hashed to the unprefixed secret`;
+  });
   void recsUnused;
   return results;
 }
