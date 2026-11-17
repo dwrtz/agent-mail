@@ -18,7 +18,7 @@
     "d1",
     "queues"
   ],
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": {
     "id": "dwrtz",
     "name": "David Wurtz"
@@ -105,6 +105,11 @@
   },
   "lineage": {},
   "changelog": [
+    {
+      "version": "0.1.3",
+      "date": "2026-11-17",
+      "note": "Mobile nav no longer stretches the unread badge into a tall pill or leaves large gaps in the header; links sit in a compact wrapping top bar. Addresses in the sidebar and member list wrap at natural breaks. New screenshots."
+    },
     {
       "version": "0.1.2",
       "date": "2026-11-17",

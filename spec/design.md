@@ -224,7 +224,7 @@ Commands: `pull [--since N]` (pull + decrypt, prints JSON), `ack <upTo>`,
 Look: system font stack, white background, 1px `#e5e7eb` borders, 8px
 radius, accent `brand_color` on primary buttons and the unread dot,
 max width 960px, left nav on desktop (Inbox, Requests, Compose, Contacts,
-Settings, with counts) and a top bar on mobile.
+Settings, with counts) and a compact top bar on mobile (brand, then a wrapping row of links with small inline badges).
 
 - **Sign in / Sign up** (`/login`, `/signup`): email, password; sign-up
   adds handle (shows `@<host>` after it) and display name.

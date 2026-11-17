@@ -128,6 +128,7 @@ export async function runUi(o: UiOpts) {
       await mp.getByRole('heading', { name: 'Set up encryption' }).waitFor();
       await mp.locator('input[type=file]').setInputFiles({ name: 'key.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(o.B.keys.at(-1))) });
       await mp.getByRole('heading', { name: 'Inbox' }).waitFor();
+      await mp.screenshot({ path: `${o.shots}/inbox-mobile.png` });
       await mp.locator('.threads a').first().click();
       await mp.getByText('hook up the connector').waitFor();
       await mp.screenshot({ path: `${o.shots}/thread-mobile.png` });

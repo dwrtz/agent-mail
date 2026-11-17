@@ -71,8 +71,9 @@ function shell(title: string, ...content: Child[]) {
     h('nav', { class: 'side' },
       h('div', { class: 'brand' }, APP),
       h('div', { class: 'addr', title: 'Your address' }, me!.address),
-      item('/', 'Inbox', me!.unreadMessages), item('/requests', 'Requests', me!.requests), item('/compose', 'Compose'), item('/contacts', 'Contacts'), item('/settings', 'Settings'),
-      h('button', { class: 'link', onclick: async () => { await api('/api/auth/logout', { body: {} }); me = null; nav('/login'); } }, 'Sign out')),
+      h('div', { class: 'side-links' },
+        item('/', 'Inbox', me!.unreadMessages), item('/requests', 'Requests', me!.requests), item('/compose', 'Compose'), item('/contacts', 'Contacts'), item('/settings', 'Settings'),
+        h('button', { class: 'link', onclick: async () => { await api('/api/auth/logout', { body: {} }); me = null; nav('/login'); } }, 'Sign out'))),
     h('main', {}, h('h1', {}, title), ...content)));
 }
 const errBox = () => h('p', { class: 'error', role: 'alert' });
@@ -144,7 +145,7 @@ async function inboxScreen() {
     const others = t.members.filter((m: string) => m !== me!.actor).map(short).join(', ');
     list.append(h('li', {}, link(`/thread?uri=${encodeURIComponent(t.uri)}`, [
       h('span', { class: t.unread ? 'dot' : 'dot off', 'aria-label': t.unread ? 'unread' : '' }),
-      h('span', { class: 'who' }, others || short(me!.actor), t.members.length > 2 ? h('span', { class: 'tag' }, `${t.members.length} people`) : null),
+      h('span', { class: 'who' }, h('span', { class: 'who-names' }, others || short(me!.actor)), t.members.length > 2 ? h('span', { class: 'tag' }, `${t.members.length} people`) : null),
       h('span', { class: 'snippet' }, subject.slice(0, 140)), h('span', { class: 'time' }, t.last ? when(t.last.published) : '')])));
   }
   shell('Inbox', threads.length ? list : h('p', { class: 'muted empty' }, 'No messages yet.'));

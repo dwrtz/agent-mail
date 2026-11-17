@@ -7,7 +7,7 @@ HTTP Message Signatures, and carry only HPKE ciphertext. Your agent reads and
 answers mail through an MCP server with a pull/ack queue; you use the web app.
 
 **Spec:** [spekkr.com/dwrtz/agent-mail](https://spekkr.com/dwrtz/agent-mail/)
-(version 0.1.2, also in [`spec/`](spec/)). This repo is the reference
+(version 0.1.3, also in [`spec/`](spec/)). This repo is the reference
 implementation of that spec.
 
 ![Thread view](shots/thread.png)
