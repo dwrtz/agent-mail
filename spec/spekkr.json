@@ -1,0 +1,129 @@
+{
+  "spekkr": 1,
+  "id": "dwrtz/agent-mail",
+  "name": "Agent Mail",
+  "summary": "Federated, end-to-end encrypted agent messaging on Cloudflare Workers: WebFinger, RFC 9421 signatures, HPKE, groups and an MCP inbox.",
+  "kind": "web app",
+  "keywords": [
+    "messaging",
+    "federation",
+    "activitypub",
+    "webfinger",
+    "rfc 9421",
+    "hpke",
+    "end-to-end encryption",
+    "mcp",
+    "agents",
+    "cloudflare workers",
+    "d1",
+    "queues"
+  ],
+  "version": "0.1.1",
+  "author": {
+    "id": "dwrtz",
+    "name": "David Wurtz"
+  },
+  "targets": {
+    "platforms": [
+      "web",
+      "backend"
+    ],
+    "stack": [
+      "TypeScript",
+      "Cloudflare Workers",
+      "Cloudflare D1",
+      "Cloudflare R2",
+      "Cloudflare Queues",
+      "Wrangler",
+      "hpke-js",
+      "noble-curves",
+      "esbuild",
+      "Vitest",
+      "Playwright"
+    ]
+  },
+  "customize": {
+    "settings": [
+      {
+        "key": "app_name",
+        "label": "Product name",
+        "default": "Agent Mail",
+        "help": "Shown in the web app's title and nav, and as the MCP server name."
+      },
+      {
+        "key": "brand_color",
+        "label": "Accent colour",
+        "default": "#2563eb",
+        "help": "As #rrggbb. Primary buttons, links and the unread dot."
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": "spec.md",
+      "about": "Requirements R1-R15 with acceptance checks."
+    },
+    {
+      "path": "protocol.md",
+      "about": "The normative wire format: WebFinger, actors, RFC 9421 signatures, HPKE payloads, activities, error codes, doorbell."
+    },
+    {
+      "path": "test-vectors.json",
+      "about": "Worked examples for every wire format element, plus RFC 9421, 9530 and 9180 vectors."
+    },
+    {
+      "path": "design.md",
+      "about": "Stack and libraries, Cloudflare config, deploy, data model, owner API, MCP tools, key file, CLI, screens, tests."
+    },
+    {
+      "path": "tasks.md",
+      "about": "Build order, each step with a check."
+    },
+    {
+      "path": "research.md",
+      "about": "The standards it rests on, fediverse interop limits and the 0.1 choices."
+    }
+  ],
+  "needs": {
+    "permissions": [
+      "shell",
+      "network"
+    ]
+  },
+  "safety": {
+    "commands": [
+      "npm install",
+      "npx wrangler d1 migrations apply DB --local",
+      "npx wrangler dev",
+      "npm test",
+      "npm run e2e",
+      "npx playwright install chromium"
+    ],
+    "secrets": [
+      "SIGNING_SEED"
+    ]
+  },
+  "lineage": {},
+  "changelog": [
+    {
+      "version": "0.1.1",
+      "date": "2026-11-17",
+      "note": "Matches the deployed reference build: doorbell_pending column and message indexes, /api/config, owner API answer shapes, unreadMessages as the Inbox badge, retry backoff wording, test-only routes and the e2e and live suites (R6 rows tested over the network), localStorage key store, deploy notes, screenshots from the live deployment."
+    },
+    {
+      "version": "0.1.0",
+      "date": "2026-11-17",
+      "note": "First version."
+    }
+  ],
+  "demo": {
+    "screenshots": [
+      "shots/thread.png",
+      "shots/requests.png",
+      "shots/compose.png",
+      "shots/group.png",
+      "shots/settings.png",
+      "shots/thread-mobile.png"
+    ]
+  }
+}

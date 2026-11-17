@@ -1,0 +1,34 @@
+{
+  "name": "agent-mail",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-ui.mjs",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "dev": "npm run build && npm run db:migrate:local && wrangler dev",
+    "test": "vitest run",
+    "e2e": "esbuild e2e/e2e.ts --bundle --platform=node --format=esm --target=node20 --outfile=.e2e/e2e.mjs --external:playwright --log-level=warning && node .e2e/e2e.mjs",
+    "typecheck": "node scripts/build-ui.mjs && tsc -p tsconfig.json && tsc -p tsconfig.ui.json && tsc -p tsconfig.node.json",
+    "deploy": "npm run build && wrangler deploy",
+    "build:cli": "esbuild cli/src/cli.ts --bundle --platform=node --format=esm --target=node20 --outfile=cli/agent-mail.mjs --banner:js=\"#!/usr/bin/env node\"",
+    "e2e:live": "esbuild e2e/live.ts --bundle --platform=node --format=esm --target=node20 --outfile=.e2e/live.mjs --external:playwright --log-level=warning && node .e2e/live.mjs",
+    "e2e:cli": "esbuild e2e/cli-smoke.ts --bundle --platform=node --format=esm --target=node20 --outfile=.e2e/cli-smoke.mjs --external:playwright --log-level=warning && node .e2e/cli-smoke.mjs"
+  },
+  "dependencies": {
+    "@hpke/core": "^1.10.1",
+    "@hpke/dhkem-x25519": "^1.8.1",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@scure/base": "^2.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261117.1",
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.65.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0",
+    "wrangler": "^4.163.0"
+  },
+  "license": "MIT"
+}

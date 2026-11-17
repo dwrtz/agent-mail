@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-mail",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-11-16",
+  "workers_dev": false,
+  "preview_urls": false,
+  "d1_databases": [{ "binding": "DB", "database_name": "agent-mail", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "agent-mail-files" }],
+  "queues": {
+    "producers": [{ "binding": "DELIVERY", "queue": "agent-mail-delivery" }],
+    "consumers": [{ "queue": "agent-mail-delivery", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 8 }]
+  },
+  "vars": { "SITE_URL": "http://localhost:8787", "ALLOWED_EMAILS": "", "ALLOW_SIGNUP": "1", "ALLOW_HTTP_LOCALHOST": "1" },
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "observability": { "enabled": true }
+}

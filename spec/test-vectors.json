@@ -1,0 +1,164 @@
+{
+  "about": "agent-mail 0.1 test vectors. Byte strings are hex unless the field name ends in _b64url or the value is a header. All JSON bodies are the exact bytes sent (UTF-8, no trailing newline).",
+  "signing_key_derivation": {
+    "SIGNING_SEED_b64url": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "handle": "alice",
+    "version": 1,
+    "hkdf": {
+      "hash": "SHA-256",
+      "salt_utf8": "agent-mail/0.1",
+      "info_utf8": "sig:alice:1",
+      "length": 32
+    },
+    "ed25519_private_seed": "a4bfaa3276a07129fef742eb2c44eb0ed070c5b9af9973cd4a5412731104a781",
+    "ed25519_public": "b2850a49b769f78591a051756f8628c4bd09830023ab7b8636cf8b8773791189",
+    "publicKeyMultibase": "z6MkrU8H2Qd7TyKtyCTBakQZAQECTHc2CD31fjYkPhMkDgqW"
+  },
+  "x25519_key": {
+    "actor": "https://b.example/users/bob",
+    "private": "bd8874968bc0f94b3662c9f58dc7b0199750e971a634549e5e1bafbe1013ccb4",
+    "public": "d2b02d07c1425920fd8acf412afaefc80e817a1010c5611aa1e7035c67142347",
+    "publicKeyMultibase": "z6LSqrcbK3Siy6nigqksUoHEEx32PPGm7HhJVJUsipHBhfNE",
+    "keyId": "https://b.example/users/bob#enc-1"
+  },
+  "webfinger": {
+    "request": "GET https://a.example/.well-known/webfinger?resource=acct:alice@a.example",
+    "content_type": "application/jrd+json",
+    "response": {
+      "subject": "acct:alice@a.example",
+      "aliases": [
+        "https://a.example/users/alice"
+      ],
+      "links": [
+        {
+          "rel": "self",
+          "type": "application/activity+json",
+          "href": "https://a.example/users/alice"
+        }
+      ]
+    }
+  },
+  "actor": {
+    "request": "GET https://a.example/users/alice",
+    "content_type": "application/activity+json",
+    "response": {
+      "@context": [
+        "https://www.w3.org/ns/activitystreams",
+        "https://w3id.org/security/multikey/v1",
+        {
+          "am": "https://spekkr.com/dwrtz/agent-mail/ns#",
+          "keyAgreement": {
+            "@id": "https://w3id.org/security#keyAgreementMethod",
+            "@type": "@id"
+          }
+        }
+      ],
+      "id": "https://a.example/users/alice",
+      "type": "Person",
+      "preferredUsername": "alice",
+      "name": "Alice",
+      "inbox": "https://a.example/users/alice/inbox",
+      "outbox": "https://a.example/users/alice/outbox",
+      "assertionMethod": [
+        {
+          "id": "https://a.example/users/alice#sig-1",
+          "type": "Multikey",
+          "controller": "https://a.example/users/alice",
+          "publicKeyMultibase": "z6MkrU8H2Qd7TyKtyCTBakQZAQECTHc2CD31fjYkPhMkDgqW"
+        }
+      ],
+      "keyAgreement": [
+        {
+          "id": "https://a.example/users/alice#enc-1",
+          "type": "Multikey",
+          "controller": "https://a.example/users/alice",
+          "publicKeyMultibase": "z6LSjE9qNtxJb6LtHUxpxc1ka8pQUjbhTHbS5JnGuG6wBEHi"
+        }
+      ],
+      "am:protocol": "agent-mail/0.1",
+      "am:readReceipts": false
+    }
+  },
+  "hpke": {
+    "suite": {
+      "mode": "base (0x00)",
+      "kem_id": 32,
+      "kdf_id": 1,
+      "aead_id": 1,
+      "names": "DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM"
+    },
+    "recipient_private": "bd8874968bc0f94b3662c9f58dc7b0199750e971a634549e5e1bafbe1013ccb4",
+    "recipient_public": "d2b02d07c1425920fd8acf412afaefc80e817a1010c5611aa1e7035c67142347",
+    "ikmE": "1ca7e487143a8daa4226780819f2b1b766a929ffad29ea3caac6129235959cba",
+    "note": "ikmE fixes the ephemeral key (RFC 9180 DeriveKeyPair) so the output is reproducible; real senders use a random ephemeral key.",
+    "info_utf8": "agent-mail/0.1 note",
+    "aad_utf8": "https://a.example/users/alice/notes/0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0\nhttps://b.example/users/bob",
+    "plaintext_utf8": "{\"v\":1,\"summary\":\"Lunch?\",\"content\":\"Are you free for lunch on Friday?\",\"attachments\":[{\"url\":\"https://a.example/attachments/6b0c2f3e9d1a4c7e8f00112233445566\",\"name\":\"hello.txt\",\"mediaType\":\"text/plain\",\"size\":17,\"key\":\"ERERERERERERERERERERERERERERERERERERERERERE\",\"iv\":\"IiIiIiIiIiIiIiIi\"}]}",
+    "enc_b64url": "S7b0vOICCmCoZto2L2rGC4431M1xdAJQbMo3CVRkdy4",
+    "ct_b64url": "g1ZGFMmri85Yp0wetRhe5nIB2Zw0KpydZPXPfxHtdGIb2HMLD24tU8swTa0MkPBCFqg2FAGhvdbLJ2_Yy5egSrgD8p6nuL6NeQ5UM9SwhaXoUFhVec9SeFLCz6MFn60idncDMVxo--P0zBR5_9fMDgRHek8TaJRQdBUBtQhozbJOVGFvRy-5R4f-PebzZdxuOfdz9-1UdU__-nQHCA9JOhcGiUZydhY37WlkWWyCHzXDDIXXxo3DH13aqzED0kmvxRIPJHwMPvmPKFUkAyFDt_atP77QvEiwWN53fmSt3VTtdBU3LWJ29KQ1e9sOvq3l9aq1cpBN-nmGe400oGVHpRRqQ8Ml3Zn9cDufc9_4qULB0d7yfXBx6SiFyiWDqSvxrIKCHZwN53d4t_Cf-N3aCMUU0Q",
+    "expected": "Opening enc/ct with recipient_private, info and aad gives plaintext_utf8. Changing any byte of aad (for example another recipient actor) fails to open."
+  },
+  "attachment": {
+    "plaintext_utf8": "hello attachment\n",
+    "key_b64url": "ERERERERERERERERERERERERERERERERERERERERERE",
+    "iv_b64url": "IiIiIiIiIiIiIiIi",
+    "algorithm": "AES-256-GCM, 128-bit tag appended, no AAD",
+    "stored_bytes": "7f926b25afeffe2b915ebd5425c387a1151c6735da4bd3e8c53aa797d70dcbe1db",
+    "size": 33,
+    "digest": "sha-256=:51OZ7zzoVN22bfHM8rQRDF8P1G+W44cFyHdiKH4kmUo=:"
+  },
+  "signed_post": {
+    "method": "POST",
+    "target_uri": "https://b.example/users/bob/inbox",
+    "body_utf8": "{\"@context\":[\"https://www.w3.org/ns/activitystreams\",{\"am\":\"https://spekkr.com/dwrtz/agent-mail/ns#\"}],\"id\":\"https://a.example/users/alice/activities/9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d\",\"type\":\"Create\",\"actor\":\"https://a.example/users/alice\",\"published\":\"2026-11-17T02:00:00Z\",\"to\":[\"https://b.example/users/bob\"],\"object\":{\"id\":\"https://a.example/users/alice/notes/0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0\",\"type\":\"Note\",\"attributedTo\":\"https://a.example/users/alice\",\"to\":[\"https://b.example/users/bob\"],\"published\":\"2026-11-17T02:00:00Z\",\"context\":\"https://a.example/users/alice/threads/5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d\",\"inReplyTo\":null,\"content\":\"This message is end-to-end encrypted.\",\"am:seq\":1,\"am:encrypted\":{\"kem\":32,\"kdf\":1,\"aead\":1,\"recipient\":\"https://b.example/users/bob\",\"keyId\":\"https://b.example/users/bob#enc-1\",\"enc\":\"S7b0vOICCmCoZto2L2rGC4431M1xdAJQbMo3CVRkdy4\",\"ct\":\"g1ZGFMmri85Yp0wetRhe5nIB2Zw0KpydZPXPfxHtdGIb2HMLD24tU8swTa0MkPBCFqg2FAGhvdbLJ2_Yy5egSrgD8p6nuL6NeQ5UM9SwhaXoUFhVec9SeFLCz6MFn60idncDMVxo--P0zBR5_9fMDgRHek8TaJRQdBUBtQhozbJOVGFvRy-5R4f-PebzZdxuOfdz9-1UdU__-nQHCA9JOhcGiUZydhY37WlkWWyCHzXDDIXXxo3DH13aqzED0kmvxRIPJHwMPvmPKFUkAyFDt_atP77QvEiwWN53fmSt3VTtdBU3LWJ29KQ1e9sOvq3l9aq1cpBN-nmGe400oGVHpRRqQ8Ml3Zn9cDufc9_4qULB0d7yfXBx6SiFyiWDqSvxrIKCHZwN53d4t_Cf-N3aCMUU0Q\"},\"attachment\":[{\"type\":\"Document\",\"url\":\"https://a.example/attachments/6b0c2f3e9d1a4c7e8f00112233445566\",\"mediaType\":\"application/octet-stream\",\"am:size\":33,\"am:digest\":\"sha-256=:51OZ7zzoVN22bfHM8rQRDF8P1G+W44cFyHdiKH4kmUo=:\"}]}}",
+    "headers": {
+      "Content-Type": "application/activity+json",
+      "Content-Digest": "sha-256=:Zklr5v8DqBfWNyw29ZA4SgNlNs1paYaqEvPD6J0vT50=:",
+      "Signature-Input": "am=(\"@method\" \"@target-uri\" \"content-type\" \"content-digest\");created=1794880800;expires=1794881100;nonce=\"bm9uY2UtMDAwMDAwMDAwMDAx\";keyid=\"https://a.example/users/alice#sig-1\";alg=\"ed25519\";tag=\"agent-mail\"",
+      "Signature": "am=:NCueSV+a55jCVz/rBrckqc0sVYP/NzBkLmFmmM/NmLDekXV7q8av5ads9DJBDWCO3fcA/EJJ4GtQAz4ILMGIDg==:"
+    },
+    "signer_private_seed": "a4bfaa3276a07129fef742eb2c44eb0ed070c5b9af9973cd4a5412731104a781",
+    "keyid": "https://a.example/users/alice#sig-1",
+    "signature_base": "\"@method\": POST\n\"@target-uri\": https://b.example/users/bob/inbox\n\"content-type\": application/activity+json\n\"content-digest\": sha-256=:Zklr5v8DqBfWNyw29ZA4SgNlNs1paYaqEvPD6J0vT50=:\n\"@signature-params\": (\"@method\" \"@target-uri\" \"content-type\" \"content-digest\");created=1794880800;expires=1794881100;nonce=\"bm9uY2UtMDAwMDAwMDAwMDAx\";keyid=\"https://a.example/users/alice#sig-1\";alg=\"ed25519\";tag=\"agent-mail\"",
+    "expected": {
+      "at_created_plus_10s": "valid",
+      "at_created_plus_400s": "signature_expired",
+      "at_created_minus_400s": "signature_expired",
+      "target_uri_changed_to_carol_inbox": "signature_invalid",
+      "content_digest_header_changed": "signature_invalid"
+    }
+  },
+  "signed_get": {
+    "method": "GET",
+    "target_uri": "https://a.example/attachments/6b0c2f3e9d1a4c7e8f00112233445566",
+    "headers": {
+      "Signature-Input": "am=(\"@method\" \"@target-uri\");created=1794880800;expires=1794881100;nonce=\"bm9uY2UtMDAwMDAwMDAwMDAy\";keyid=\"https://b.example/users/bob#sig-1\";alg=\"ed25519\";tag=\"agent-mail\"",
+      "Signature": "am=:LBIYNzaPbYRPz/Y4C9rIaAhZNVcvGdJGz6cDG28JiP9BA2owGKvyB7dgAeBB3gP9vt3ymJoDp1lW0IeGfd/sAg==:"
+    },
+    "signer_private_seed": "3c7e8342ac36186ef455a114f2eb7edeb1842b2cfed290320c8c343790f8ccca",
+    "signer_public": "b7c71bdb76853682b7cc04f5787ada42b218e6230b986b42dc0a141d0dd3622f",
+    "keyid": "https://b.example/users/bob#sig-1",
+    "signature_base": "\"@method\": GET\n\"@target-uri\": https://a.example/attachments/6b0c2f3e9d1a4c7e8f00112233445566\n\"@signature-params\": (\"@method\" \"@target-uri\");created=1794880800;expires=1794881100;nonce=\"bm9uY2UtMDAwMDAwMDAwMDAy\";keyid=\"https://b.example/users/bob#sig-1\";alg=\"ed25519\";tag=\"agent-mail\"",
+    "expected": "Valid at created+10 s with the public key above; the response is stored_bytes with Content-Digest equal to attachment.digest."
+  },
+  "rfc_vectors": {
+    "note": "Standard vectors from the RFCs that the reference implementation also passes.",
+    "rfc9530": {
+      "body_utf8": "{\"hello\": \"world\"}",
+      "Content-Digest": "sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"
+    },
+    "rfc9421_b26": {
+      "private_d_b64url": "n4Ni-HpISpVObnQMW0wOhCKROaIKqKtW_2ZYb2p9KcU",
+      "signature_base": "\"date\": Tue, 20 Apr 2021 02:07:55 GMT\n\"@method\": POST\n\"@path\": /foo\n\"@authority\": example.com\n\"content-type\": application/json\n\"content-length\": 18\n\"@signature-params\": (\"date\" \"@method\" \"@path\" \"@authority\" \"content-type\" \"content-length\");created=1618884473;keyid=\"test-key-ed25519\"",
+      "Signature": "sig-b26=:wqcAqbmYJ2ji2glfAMaRy4gruYYnx2nEFN2HN6jrnDnQCK1u02Gb04v9EDgwUPiu4A0w6vuQv5lIp5WPpBKRCw==:"
+    },
+    "rfc9180_a11": {
+      "skRm": "4612c550263fc8ad58375df3f557aac531d26850903e55a9f23f21d8534e8ac8",
+      "enc": "37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431",
+      "info": "4f6465206f6e2061204772656369616e2055726e",
+      "aad": "436f756e742d30",
+      "ct": "f938558b5d72f1a23810b4be2ab4f84331acc02fc97babc53a52ae8218a355a96d8770ac83d07bea87e13c512a",
+      "pt_utf8": "Beauty is truth, truth beauty"
+    }
+  }
+}

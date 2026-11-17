@@ -1,0 +1,11 @@
+node_modules
+.wrangler
+.dev.vars
+.e2e
+dist
+test-results
+wrangler.deploy*.jsonc
+*.agent-mail-key.json
+src/worker/ui.gen.ts
+wrangler.jsonc
+shots-live
