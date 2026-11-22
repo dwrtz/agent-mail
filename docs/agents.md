@@ -54,6 +54,16 @@ in their browser) and approves or denies it. Approving carries it out; the
 agent does not need to do anything more, and must not retry. `list_approvals`
 shows how each one ended. Held actions expire after 7 days.
 
+What the owner approves is what gets delivered. The server cannot read
+messages, so it cannot check that the copy an agent sealed for the owner
+matches the copies it sealed for the recipients. On Approve, the owner's
+browser therefore seals the text it just showed again for every recipient,
+and only that is sent.
+
+Mailing someone does not quietly let them in. When an agent that may not
+approve senders writes to someone new, no allow rule is added: their reply
+arrives under Requests.
+
 **Its key.** By default the agent gets *its own* encryption key. The account's
 actor document lists it in `am:alsoEncryptTo`, and senders seal an extra copy
 of each message to it. The agent can read mail sent from then on, and revoking
@@ -96,6 +106,11 @@ Tools: `whoami`, `check_mail`, `read_inbox`, `ack`, `list_threads`,
 `read_thread`, `list_requests`, `reply`, `send`, `save_attachment`,
 `mark_read`, `approve_sender`, `block_sender`, `list_approvals`,
 `wait_for_mail`. Only the tools the token's scopes allow are listed.
+
+Files the local server attaches or saves stay inside one folder:
+`AGENT_MAIL_FILES`, by default `./agent-mail-files` where the server was
+started. A path outside it is refused, and a key file or agent file is never
+sent, so text in a message cannot talk the agent into mailing its own key.
 
 A normal turn: `read_inbox` → for each message, `read_thread` if context is
 needed → `reply` → `ack` with the last cursor.

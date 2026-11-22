@@ -127,8 +127,10 @@ export async function checkSend(env: Env, u: UserRow, body: SendBody): Promise<{
   const me = actorUrl(env, u.handle);
   const d = await env.DB.prepare('SELECT * FROM drafts WHERE note_id = ? AND user_id = ?').bind(body?.noteId ?? '', u.id).first<any>();
   if (!d) throw new HttpError(404, 'not_found', 'no such draft; call prepare first');
-  if (d.sent_result === 'sending') throw new HttpError(409, 'send_in_progress', 'this message is being sent; ask again in a moment');
-  if (d.sent_result) return { sent: { ...parseJson<any>(d.sent_result, {}), duplicate: true } };
+  if (isSending(d.sent_result)) {
+    // A call is delivering this draft right now. A mark older than a minute is one that died before writing anything.
+    if (d.sent_result > staleMark()) throw new HttpError(409, 'send_in_progress', 'this message is being sent; ask again in a moment');
+  } else if (d.sent_result) return { sent: { ...parseJson<any>(d.sent_result, {}), duplicate: true } };
   if (d.expires_at < nowIso()) throw new HttpError(410, 'draft_expired', 'the draft expired; prepare again');
   const { activityId, recipients } = JSON.parse(d.recipients) as { activityId: string; recipients: DraftRecipient[] };
   if (!Array.isArray(body.payloads) || body.payloads.length !== recipients.length) throw new HttpError(400, 'bad_request', 'one payload per recipient is required');
@@ -138,6 +140,7 @@ export async function checkSend(env: Env, u: UserRow, body: SendBody): Promise<{
     if (!r || !okBlock(p) || p.keyId !== r.keyId || !okCopies(p, r.also ?? [])) throw new HttpError(400, 'bad_request', `bad payload for ${p?.recipient}`);
     byRecipient.set(r.actor, p);
   }
+  if (byRecipient.size !== recipients.length) throw new HttpError(400, 'bad_request', 'exactly one payload per recipient is required');
   const self = await myEncKey(env, u);
   if (!okBlock(body.selfPayload) || body.selfPayload.keyId !== self.keyId) throw new HttpError(400, 'bad_request', 'selfPayload must be encrypted to your latest key');
   if (!okCopies(body.selfPayload, self.alsoKeys.map(k => k.keyId))) throw new HttpError(400, 'bad_request', 'selfPayload copies must be sealed to your own client keys');
@@ -159,43 +162,95 @@ export async function checkSend(env: Env, u: UserRow, body: SendBody): Promise<{
   return { checked };
 }
 
-/** Delivers a checked send: stores the sender's copy and queues one signed POST per recipient. */
-export async function deliver(env: Env, ctx: ExecutionContext, u: UserRow, c: Checked, o: { agent?: boolean } = {}) {
+const isSending = (v: unknown): v is string => typeof v === 'string' && v.startsWith('sending:');
+const staleMark = () => `sending:${new Date(Date.now() - 60_000).toISOString()}`;
+
+/**
+ * Delivers a checked send: stores the sender's copy and queues one signed POST per recipient.
+ * Everything is written in one D1 batch (all or nothing), so a failure leaves the draft unsent and
+ * retryable; the queue messages go out after the batch, and cron re-queues any that were lost.
+ * `allowNew`: add an allow rule for recipients that have none (what sending does for the owner).
+ */
+export async function deliver(env: Env, ctx: ExecutionContext, u: UserRow, c: Checked, o: { agent?: boolean; allowNew?: boolean } = {}) {
   const me = actorUrl(env, u.handle);
   // Claim the draft so that two calls racing on the same note deliver once.
-  const claim = await env.DB.prepare("UPDATE drafts SET sent_result = 'sending' WHERE note_id = ? AND user_id = ? AND sent_result IS NULL").bind(c.noteId, u.id).run();
+  const mark = `sending:${nowIso()}`;
+  const claim = await env.DB.prepare("UPDATE drafts SET sent_result = ? WHERE note_id = ? AND user_id = ? AND (sent_result IS NULL OR (sent_result LIKE 'sending:%' AND sent_result < ?))")
+    .bind(mark, c.noteId, u.id, staleMark()).run();
   if (!claim.meta.changes) throw new HttpError(409, 'send_in_progress', 'this message is already being sent');
+  let seq = 0;
+  let res: D1Result<{ id: number }>[];
+  const result = { status: 'sent', noteId: c.noteId, threadId: c.thread, deliveries: c.recipients.map(r => ({ target: r.actor, status: 'queued' })) };
   try {
     const now = nowIso();
     const published = now.replace(/\.\d{3}Z$/, 'Z');
-    const seq = await takeSeq(env, u, c.thread);
+    seq = await takeSeq(env, u, c.thread);
     const make = (p: Payload, recipient: string) => noteActivity(me, c, p, recipient, { seq, published, agent: !!o.agent });
-    if (c.newThread) {
-      await env.DB.prepare('INSERT OR IGNORE INTO threads (user_id, uri, creator, members, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').bind(u.id, c.thread, me, c.membersJson, now, now).run();
-    } else await env.DB.prepare('UPDATE threads SET updated_at = ? WHERE user_id = ? AND uri = ?').bind(now, u.id, c.thread).run();
-    const msg = await env.DB.prepare(`INSERT INTO messages (user_id, direction, activity_id, type, note_id, thread, actor, activity, published, state, received_at)
-        VALUES (?, 'out', ?, 'Create', ?, ?, ?, ?, ?, 'sent', ?) RETURNING id`)
-      .bind(u.id, c.activityId, c.noteId, c.thread, me, JSON.stringify(make(c.selfPayload, me)), published, now).first<{ id: number }>();
-    const deliveries = [];
+    const db = env.DB;
+    const stmts: D1PreparedStatement[] = [
+      c.newThread
+        ? db.prepare('INSERT OR IGNORE INTO threads (user_id, uri, creator, members, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').bind(u.id, c.thread, me, c.membersJson, now, now)
+        : db.prepare('UPDATE threads SET updated_at = ? WHERE user_id = ? AND uri = ?').bind(now, u.id, c.thread),
+      db.prepare(`INSERT INTO messages (user_id, direction, activity_id, type, note_id, thread, actor, activity, published, state, received_at)
+          VALUES (?, 'out', ?, 'Create', ?, ?, ?, ?, ?, 'sent', ?)`).bind(u.id, c.activityId, c.noteId, c.thread, me, JSON.stringify(make(c.selfPayload, me)), published, now),
+    ];
+    const first = stmts.length;
     for (const r of c.recipients) {
-      for (const a of c.attEntries) await env.DB.prepare('INSERT OR IGNORE INTO attachment_grants (attachment_id, actor) VALUES (?, ?)').bind(a.id, r.actor).run();
-      await env.DB.prepare('INSERT OR IGNORE INTO rules (user_id, subject, action, created_at) VALUES (?, ?, \'allow\', ?)').bind(u.id, r.actor, now).run();
-      deliveries.push(await queueDelivery(env, u.id, msg!.id, r.actor, r.inbox, JSON.stringify(make(c.byRecipient.get(r.actor)!, r.actor))));
+      stmts.push(db.prepare(`INSERT INTO deliveries (user_id, message_id, target, inbox, body, status, updated_at)
+          VALUES (?1, (SELECT id FROM messages WHERE user_id = ?1 AND direction = 'out' AND activity_id = ?2), ?3, ?4, ?5, 'queued', ?6) RETURNING id`)
+        .bind(u.id, c.activityId, r.actor, r.inbox, JSON.stringify(make(c.byRecipient.get(r.actor)!, r.actor)), now));
     }
-    const result = { status: 'sent', noteId: c.noteId, threadId: c.thread, deliveries };
+    for (const r of c.recipients) {
+      for (const a of c.attEntries) stmts.push(db.prepare('INSERT OR IGNORE INTO attachment_grants (attachment_id, actor) VALUES (?, ?)').bind(a.id, r.actor));
+      if (o.allowNew !== false) stmts.push(db.prepare("INSERT OR IGNORE INTO rules (user_id, subject, action, created_at) VALUES (?, ?, 'allow', ?)").bind(u.id, r.actor, now));
+    }
     // Keep the draft for an hour as the record a retried send is answered from.
-    await env.DB.prepare('UPDATE drafts SET sent_result = ?, expires_at = ? WHERE note_id = ?').bind(JSON.stringify(result), isoIn(3600), c.noteId).run();
-    return result;
+    stmts.push(db.prepare('UPDATE drafts SET sent_result = ?, expires_at = ? WHERE note_id = ? AND sent_result = ?').bind(JSON.stringify(result), isoIn(3600), c.noteId, mark));
+    res = (await db.batch<{ id: number }>(stmts)).slice(first, first + c.recipients.length);
   } catch (e) {
-    await env.DB.prepare("UPDATE drafts SET sent_result = NULL WHERE note_id = ? AND sent_result = 'sending'").bind(c.noteId).run();
+    // Nothing was written. Free the draft and give the sequence number back, so a retry is clean.
+    await env.DB.prepare('UPDATE drafts SET sent_result = NULL WHERE note_id = ? AND sent_result = ?').bind(c.noteId, mark).run().catch(() => {});
+    if (seq) await env.DB.prepare('UPDATE seqs SET last = last - 1 WHERE user_id = ? AND thread = ? AND actor = ? AND last = ?').bind(u.id, c.thread, me, seq).run().catch(() => {});
     throw e;
   }
+  for (const r of res) {
+    const id = r.results?.[0]?.id;
+    if (id) await env.DELIVERY.send({ kind: 'deliver', id }).catch(e => console.log(`[deliver] ${id} not queued, cron will: ${String(e).slice(0, 120)}`));
+  }
+  return result;
 }
 
 /** Check and deliver in one step (the owner in the web app, or an approved held send). */
-export async function send(env: Env, ctx: ExecutionContext, u: UserRow, body: SendBody, o: { agent?: boolean } = {}) {
+export async function send(env: Env, ctx: ExecutionContext, u: UserRow, body: SendBody, o: { agent?: boolean; allowNew?: boolean } = {}) {
   const r = await checkSend(env, u, body);
   return 'sent' in r ? r.sent : deliver(env, ctx, u, r.checked, o);
+}
+
+/**
+ * Looks the recipients of a draft up again and returns what a client needs to seal it: used when the
+ * owner approves a held message, days later perhaps, so that it is sealed to the keys that are current then.
+ */
+export async function refreshDraft(env: Env, ctx: ExecutionContext, u: UserRow, noteId: string) {
+  const d = await env.DB.prepare('SELECT * FROM drafts WHERE note_id = ? AND user_id = ?').bind(noteId, u.id).first<any>();
+  if (!d || d.expires_at < nowIso()) throw new HttpError(410, 'draft_expired', 'the held message has expired');
+  if (d.sent_result && !isSending(d.sent_result)) throw new HttpError(409, 'already_sent', 'this message was already sent');
+  const stored = JSON.parse(d.recipients) as { activityId: string; recipients: DraftRecipient[] };
+  const docs = await resolveMany(env, ctx, stored.recipients.map(r => r.actor));
+  const missing = docs.filter(r => !r.keyId);
+  if (missing.length) throw new HttpError(422, 'no_encryption_key', `${missing.map(m => m.handle).join(', ')} has no encryption key any more`);
+  const recipients = docs.map(r => ({ actor: r.actor, handle: r.handle, keyId: r.keyId!, publicKey: r.publicKey!, alsoKeys: r.alsoKeys }));
+  await env.DB.prepare('UPDATE drafts SET recipients = ? WHERE note_id = ?')
+    .bind(JSON.stringify({ activityId: stored.activityId, recipients: docs.map(r => ({ actor: r.actor, inbox: r.inbox, keyId: r.keyId, also: r.alsoKeys.map(k => k.keyId) })) }), noteId).run();
+  return { noteId, threadId: d.thread as string, seq: d.seq as number, recipients, self: await myEncKey(env, u) };
+}
+
+/** Deliveries that were written but never reached the queue (or whose queue message was lost): queue them again. */
+export async function requeueStale(env: Env) {
+  const rows = (await env.DB.prepare("SELECT id FROM deliveries WHERE status = 'queued' AND attempts = 0 AND updated_at < ? ORDER BY id LIMIT 50").bind(new Date(Date.now() - 10 * 60_000).toISOString()).all<{ id: number }>()).results;
+  for (const r of rows) {
+    await env.DB.prepare('UPDATE deliveries SET updated_at = ? WHERE id = ?').bind(nowIso(), r.id).run();
+    await env.DELIVERY.send({ kind: 'deliver', id: r.id });
+  }
 }
 
 async function queueDelivery(env: Env, userId: number, messageId: number, target: string, inbox: string, body: string) {

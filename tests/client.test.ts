@@ -1,6 +1,8 @@
 // Client-side sealing to several keys (R18): the owner's key plus each agent's client key.
 import { describe, it, expect } from 'vitest';
-import { encryptAndSend, decryptActivity, newKeyFile, Prepared, Transport } from '../src/shared/client';
+import { encryptAndSend, decryptActivity, newKeyFile, resealHeld, Prepared, Transport } from '../src/shared/client';
+import { sealNote } from '../src/shared/e2ee';
+import { unb64url } from '../src/shared/enc';
 
 const bob = 'https://b.example/users/bob', alice = 'https://a.example/users/alice';
 const key = (actor: string, n: number) => newKeyFile('x@example', actor, `${actor}#enc-${n}`);
@@ -47,5 +49,18 @@ describe('sealing to client keys', () => {
     await encryptAndSend(f.t, { to: ['bob@b.example'] }, { text: 'bound' });
     const moved = f.toBob(); moved.object['am:encrypted'].recipient = alice;
     await expect(decryptActivity([bobAgent], moved)).rejects.toThrow();
+  });
+
+  it('resealHeld delivers what the owner read, whatever the agent sealed for the recipient', async () => {
+    const seal = (k: ReturnType<typeof key>, actor: string, text: string) => sealNote(unb64url(k.publicKey), prepared.noteId, actor, { v: 1, summary: null, content: text, attachments: [] });
+    // The agent's held send: one text for the owner's eyes, another for bob.
+    const forOwner = await seal(aliceMain, alice, 'Lunch on Friday?');
+    const held = { type: 'Create', actor: alice, object: { id: prepared.noteId, 'am:encrypted': { recipient: alice, keyId: aliceMain.keyId, ...forOwner } } };
+    const r = await resealHeld([aliceMain], held, prepared);
+    expect(r.payload.content).toBe('Lunch on Friday?');
+    const toBob = { type: 'Create', actor: alice, object: { id: prepared.noteId, 'am:encrypted': { recipient: bob, keyId: r.payloads[0].keyId, enc: r.payloads[0].enc, ct: r.payloads[0].ct }, 'am:copies': r.payloads[0].copies } };
+    for (const k of [bobMain, bobAgent]) expect((await decryptActivity([k], toBob)).content).toBe('Lunch on Friday?');
+    expect(r.selfPayload.keyId).toBe(aliceMain.keyId);
+    await expect(resealHeld([bobMain], held, prepared)).rejects.toThrow(/no key for/); // without the owner's key there is nothing to approve
   });
 });

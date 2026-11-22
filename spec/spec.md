@@ -183,7 +183,9 @@ host differ); lookups of `acct:x@other.host` and of an unknown handle are 404.
   3. **Sending again is safe.** For one hour after a draft is sent, a
      repeated send for the same Note id answers with the first result plus
      `duplicate: true` and delivers nothing. While the first call is still
-     running the answer is 409 `send_in_progress`.
+     running the answer is 409 `send_in_progress`; a first call that has
+     shown no result for a minute is taken to have died before writing
+     anything, and the next one takes over.
 - Recipients are a list of handles or actor URLs; the thread has at most 50
   members including the sender, else 422 `group_too_large`. A recipient
   without an encryption key gives 422 `no_encryption_key` naming them; an
@@ -191,6 +193,14 @@ host differ); lookups of `acct:x@other.host` and of an unknown handle are 404.
 - A reply names the Note it answers; it goes to that Note's thread and all
   its current members except the sender, with `inReplyTo` set.
 - Sending to someone adds an `allow` rule for them if there is no rule yet.
+  A send made with a token does so only when the token has the `manage`
+  scope and does not ask about `policy` (R16); a held message that the
+  owner approved does, like the owner's own send.
+- **All or nothing.** The sender's copy, the deliveries, the grants and the
+  rules of one send are written in a single D1 batch, then the queue
+  messages are sent. A send that fails writes nothing, gives its sequence
+  number back and can be repeated. A delivery that was written but never
+  attempted for 10 minutes is queued again by the cron.
 - The queue consumer signs each POST fresh (new `created`, `nonce`), and on
   a network error, 5xx, 408 or 429 retries with backoff
   (the first retry 30 s after the first failure, then doubling, capped at
@@ -483,7 +493,9 @@ app on the consent screen.
 - **Never the account.** Whatever its scopes, a token cannot create, list
   or revoke tokens, publish or remove keys, change settings or the
   doorbell, write rules, or decide approvals. Those need the owner's
-  session; a token gets 403 `session_required`.
+  session; a token gets 403 `session_required`. `GET /api/me` with a token
+  leaves out the email, the doorbell and the other agents. Token ids are
+  never reused.
 - **Autonomy.** An agent's calls are carried out at once, without asking,
   unless one of these holds:
 
@@ -501,14 +513,27 @@ app on the consent screen.
 - **Held calls.** A held call is fully checked first, then stored, and
   answers `{"status":"pending_approval","approvalId":<n>,"reason":"<ask value or agent_flagged>"}`
   (HTTP 202 for a send). Nothing is delivered or changed. Repeating the
-  same call returns the same approval. Held calls expire after 7 days.
+  same call returns the same approval; a different request about the same
+  thread or sender is a separate approval. Held calls expire after 7 days
+  (deciding an expired one is 410 `approval_expired`).
 - **Deciding.** Only the owner's session can approve or deny. The owner
   sees who asked, what, and why; for a held message, the instance returns
   the sender's own ciphertext so the browser can decrypt and show it.
   Approving carries the call out as the user (a message is sent with
   `am:agent`); the result, or the failure, is recorded on the approval.
   Denying records it; asking again for a denied message answers
-  `{"status":"denied"}` and sends nothing.
+  `{"status":"denied"}` and sends nothing. A decision runs to its end even
+  if the browser goes away, and a decision that died midway can be made
+  again after two minutes.
+- **What is delivered is what the owner read.** The instance cannot see
+  whether the copy an agent sealed for the owner and the copies it sealed
+  for the recipients say the same thing. So a held message is never
+  delivered as the agent sealed it. To approve, the owner's client asks
+  for the recipients' current keys (`POST /api/approvals/<id>/prepare`),
+  opens the agent's copy, seals that same plaintext again for every
+  recipient key and for its own, and sends those with the approval. An
+  approval of a message without them is 400 `reseal_required`. A client
+  that cannot open the agent's copy cannot approve it, only deny it.
 - **For the agent.** `list_approvals` returns its own approvals with
   status `pending`, `approved` (with the result), `denied`, `cancelled`,
   `expired` or `failed`; `cancel_approval` withdraws a pending one. An
@@ -521,7 +546,9 @@ cannot send or approve; a send to a new contact is held, visible and
 readable to the owner, delivered only after approval; a send to an allowed
 contact goes out at once; a `sensitive` send that is denied is never
 delivered and leaves no sequence gap; `approve`, `block` and a membership
-change by an agent are held.
+change by an agent are held; a held message whose copy for the recipient
+differs from the copy shown to the owner arrives as the text the owner
+read; a send by a token that cannot approve senders adds no allow rule.
 
 ### R17. OAuth for the MCP connector
 
@@ -556,9 +583,13 @@ change by an agent are held.
 - **Token.** `POST /oauth/token` (form or JSON). `authorization_code`:
   the code is single use, lasts 5 minutes, and is bound to the client, the
   redirect URI and the code challenge. `refresh_token`: rotating, single
-  use. Access tokens last 1 hour, refresh tokens 90 days. Errors are
-  RFC 6749 JSON (`invalid_grant`, `invalid_request`,
-  `unsupported_grant_type`).
+  use; a refresh token that is presented a second time has leaked, so
+  every token of that grant ends and the app must be connected again. A
+  token pair is only issued while the grant still exists. Access tokens
+  last 1 hour, refresh tokens 90 days. Errors are RFC 6749 JSON
+  (`invalid_grant`, `invalid_request`, `unsupported_grant_type`).
+- A registered client is kept while a grant uses it, and for 90 days after
+  it was last used (7 days if it never was).
 - A grant is a connector token (R16) of kind `oauth`, labelled with the
   client's name: same scopes, same ask list, its own queue position,
   listed and revoked with the other agents. An access token is never an
@@ -569,7 +600,8 @@ Check: the metadata documents; registration (and a `javascript:` redirect
 refused); a consent that is refused for a foreign redirect URI or without
 S256; a code that works once and only with the right verifier; an access
 token that reaches `/mcp` with only the allowed tools; a refresh token
-that works once; revoking the grant ends both.
+that works once, and whose second use ends the tokens issued after it;
+revoking the grant ends access and refreshing.
 
 ### R18. Agent keys and the agent marker
 
@@ -611,6 +643,12 @@ by the owner does not.
   text tools (`read_inbox`, `reply`, `send`, `read_thread`,
   `wait_for_mail`, ...), listing only what the token's scopes allow. It
   decrypts and encrypts locally; the instance still sees only ciphertext.
+- **Files.** Paths a model gives the local server (attachments to send, a
+  place to save one) are resolved inside one folder, `AGENT_MAIL_FILES`
+  (default `./agent-mail-files`), and refused outside it, also through a
+  symlink. Neither the server nor the commands will send a key file or an
+  agent file. Text in a message must not be able to make the agent mail
+  its own key or overwrite a file.
 - **Watch.** `agent-mail watch [--exec CMD] [--once]` holds the server
   stream open, also checks on an interval, and prints a line or runs the
   command when there is new unacked mail, a new request, or an approval
@@ -624,8 +662,9 @@ by the owner does not.
   **`/robots.txt`** allows `/` and `/llms.txt` only.
 
 Check: `npm run e2e:cli` drives the commands, `watch --once` and the local
-MCP server over stdio (initialize, tools, read, reply, wait); the discovery
-files answer with the stated types.
+MCP server over stdio (initialize, tools, read, reply, wait; a path outside
+the files folder and an agent file as attachment are refused); the
+discovery files answer with the stated types.
 
 ## Definition of done
 

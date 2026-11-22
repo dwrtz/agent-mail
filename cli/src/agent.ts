@@ -1,7 +1,7 @@
 // What an agent does with an inbox, with the crypto done here: the instance only ever sees ciphertext.
 // Used by the CLI commands and by the local MCP server (`agent-mail mcp`).
-import { readFileSync, writeFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, realpathSync, mkdirSync } from 'node:fs';
+import { basename, dirname, resolve, sep } from 'node:path';
 import { McpClient } from './mcp-client';
 import { checkKeyFile, encryptAndSend, decryptActivity, decryptAttachment, Transport, KeyFile, OutFile } from '../../src/shared/client';
 import { unb64 } from '../../src/shared/enc';
@@ -32,6 +32,22 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   cfg.url = cfg.url.replace(/\/+$/, '');
   if (env.AGENT_MAIL_NAME) cfg.name = env.AGENT_MAIL_NAME;
   return cfg;
+}
+
+/**
+ * Resolves `p` inside `dir` and refuses anything that ends up outside it (also through a symlink).
+ * The local MCP server uses this for every path a model gives it: text in a message must not be able
+ * to make the agent attach, or overwrite, an arbitrary file on the machine.
+ */
+export function insideDir(dir: string, p: string): string {
+  mkdirSync(dir, { recursive: true });
+  const base = realpathSync(dir);
+  const full = resolve(base, String(p));
+  let probe = full;
+  while (!existsSync(probe)) probe = dirname(probe);
+  const real = realpathSync(probe) + full.slice(probe.length);
+  if (real !== base && !real.startsWith(base + sep)) throw new Error(`files must be inside ${base}`);
+  return real;
 }
 
 const short = (actor: string) => { try { const u = new URL(actor); return `${u.pathname.split('/').pop()}@${u.host}`; } catch { return actor; } };
@@ -77,7 +93,12 @@ export class Agent {
     };
   }
   files(paths: string[]): OutFile[] {
-    return paths.map(p => ({ name: basename(p), mediaType: 'application/octet-stream', bytes: new Uint8Array(readFileSync(p)) }));
+    return paths.map(p => {
+      const bytes = new Uint8Array(readFileSync(p));
+      // A key file or agent file is never mail. Refusing here covers the commands and the local MCP server alike.
+      if (bytes.length < 65536 && /"type"\s*:\s*"agent-mail-(key|agent)"/.test(new TextDecoder().decode(bytes))) throw new Error(`${basename(p)} is an Agent Mail key or agent file; it is not sent`);
+      return { name: basename(p), mediaType: 'application/octet-stream', bytes };
+    });
   }
   /** Encrypts to every recipient key (and their agents' keys) and sends. The answer is `sent` or `pending_approval`. */
   send(target: { to?: string[]; replyTo?: string; threadId?: string }, msg: { subject?: string | null; text: string; attach?: string[]; sensitive?: boolean }) {

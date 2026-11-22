@@ -70,8 +70,9 @@ export async function authenticate(env: Env, req: Request): Promise<Caller | nul
     const h = hex(await sha256(auth.slice(7).trim()));
     let t = await env.DB.prepare("SELECT id, user_id, label, kind, scopes, ask FROM api_tokens WHERE token_hash = ? AND kind = 'token'").bind(h).first<TokenRow>();
     if (!t) {
-      t = await env.DB.prepare(`SELECT t.id, t.user_id, t.label, t.kind, t.scopes, t.ask FROM oauth_tokens o JOIN api_tokens t ON t.id = o.token_id
-          WHERE o.access_hash = ? AND o.access_expires_at > ?`).bind(h, nowIso()).first<TokenRow>();
+      t = await env.DB.prepare(`SELECT t.id, t.user_id, t.label, t.kind, t.scopes, t.ask FROM oauth_tokens o
+          JOIN api_tokens t ON t.id = o.token_id AND t.kind = 'oauth' AND t.client_id = o.client_id
+          WHERE o.access_hash = ? AND o.access_expires_at > ? AND o.rotated_at IS NULL`).bind(h, nowIso()).first<TokenRow>();
     }
     if (!t) return null;
     await env.DB.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?').bind(nowIso(), t.id).run();

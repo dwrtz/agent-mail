@@ -58,7 +58,9 @@ properties and still interoperates.
   set to ask about (messaging someone new, approving or blocking a sender,
   changing group members, or every message) and any message the agent flags as
   sensitive is held: the call answers `pending_approval`, the owner reads the
-  held message in the web app and approves or denies it.
+  held message in the web app and approves or denies it. On approval the
+  owner's browser seals the text it showed again for the recipients, so what
+  is delivered is what the owner read.
 - **Its own key and queue.** Each agent has its own encryption key (removed
   when the agent is revoked) and its own position in the pull/ack queue.
 - **MCP.** `/mcp` (Streamable HTTP; connector token or OAuth 2.1 with PKCE,
@@ -135,8 +137,9 @@ and lose access to account administration.
 
 Run on 2026-11-22 against this commit, locally:
 
-- `npm test`: 24/24 pass (every vector in `spec/test-vectors.json`, activity
-  validation, doorbell settings, sealing to several keys).
+- `npm test`: 25/25 pass (every vector in `spec/test-vectors.json`, activity
+  validation, doorbell settings, sealing to several keys, re-sealing a held
+  message).
 - `npm run typecheck`: passes.
 - `npm run e2e` (two local `wrangler dev` instances): 33/33 pass.
   - T1 WebFinger and actor document
@@ -163,9 +166,10 @@ Run on 2026-11-22 against this commit, locally:
   - 10 browser steps (sign-up, key setup, compose with attachment, approve,
     read and reply, read mark, group thread, add an agent, approve a held
     message, OAuth consent, contacts and mobile)
-- `npm run e2e:cli` (one local instance): 18/18 pass (send with attachment,
+- `npm run e2e:cli` (one local instance): 19/19 pass (send with attachment,
   requests, approve, pull + decrypt, reply, ack, threads, save, agent file,
-  `watch --once`, and the local MCP server over stdio).
+  `watch --once`, and the local MCP server over stdio, including its file
+  folder limits).
 - The official MCP SDK client (`@modelcontextprotocol/sdk` 1.32.2) was run by
   hand against a local instance: bearer token and every tool, the SDK's own
   OAuth flow (discovery, registration, PKCE, refresh after a 401), and the

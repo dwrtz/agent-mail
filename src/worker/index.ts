@@ -4,7 +4,7 @@ import { signup, login, logout, authenticate } from './auth';
 import { ownerApi, sendFromApi } from './api';
 import { mcp } from './mcp';
 import { oauthRoute, resourceMetadataUrl, CORS } from './oauth';
-import { consume } from './outbox';
+import { consume, requeueStale } from './outbox';
 import { setAllowLocalHttp } from '../shared/activity';
 import ui from './ui.gen';
 import { testRoutes } from './testroutes';
@@ -17,7 +17,8 @@ const DOCS = 'https://github.com/dwrtz/agent-mail/blob/main/docs/agents.md';
 
 /** A cookie is sent by the browser on its own, so a state-changing request that relies on one must come from this site. */
 function checkOrigin(req: Request, env: Env) {
-  if (STATE_CHANGING.has(req.method) && req.headers.get('cookie') && !req.headers.get('authorization') && req.headers.get('origin') !== origin(env)) {
+  // Only a Bearer header makes the request an agent's; with anything else the cookie is what authenticates it.
+  if (STATE_CHANGING.has(req.method) && req.headers.get('cookie') && !req.headers.get('authorization')?.startsWith('Bearer ') && req.headers.get('origin') !== origin(env)) {
     throw new HttpError(403, 'bad_origin', 'Origin must be this site');
   }
 }
@@ -151,9 +152,12 @@ export default {
       env.DB.prepare('DELETE FROM mcp_sessions WHERE last_seen_at < ?').bind(ago(86400)),
       env.DB.prepare('DELETE FROM oauth_codes WHERE expires_at < ?').bind(now),
       env.DB.prepare('DELETE FROM oauth_tokens WHERE refresh_expires_at < ?').bind(now),
-      env.DB.prepare("DELETE FROM oauth_clients WHERE created_at < ? AND client_id NOT IN (SELECT client_id FROM api_tokens WHERE client_id IS NOT NULL)").bind(ago(7 * 86400)),
+      // A registered client is forgotten when nothing was granted to it and it was never used (after a week) or not used for 90 days.
+      env.DB.prepare(`DELETE FROM oauth_clients WHERE source = 'registered' AND client_id NOT IN (SELECT client_id FROM api_tokens WHERE client_id IS NOT NULL)
+          AND ((fetched_at = created_at AND created_at < ?) OR fetched_at < ?)`).bind(ago(7 * 86400), ago(90 * 86400)),
       env.DB.prepare("UPDATE approvals SET status = 'expired', decided_at = ? WHERE status = 'pending' AND expires_at < ?").bind(now, now),
-      env.DB.prepare("DELETE FROM approvals WHERE status != 'pending' AND created_at < ?").bind(ago(90 * 86400)),
+      env.DB.prepare("DELETE FROM approvals WHERE status NOT IN ('pending', 'approving') AND created_at < ?").bind(ago(90 * 86400)),
     ]);
+    await requeueStale(env);
   },
 } satisfies ExportedHandler<Env, QueueMsg>;

@@ -1,7 +1,7 @@
 // Owner MCP connector (R12): Streamable HTTP, JSON-RPC 2.0. The caller is always an agent holding a
 // connector token or an OAuth access token; its scopes decide which tools it has.
 import { Env, HttpError, json, nowIso, Caller, consumerOf, requireScope, Scope } from './env';
-import { meInfo, threadsList, threadMessages, getMessage, fetchAttachment, uploadAttachment } from './api';
+import { meInfo, threadsList, threadMessages, getMessage, fetchAttachment, uploadAttachment, finishing } from './api';
 import { pull, ack, listRequests, counts } from './inboxq';
 import { prepare, markRead } from './outbox';
 import { gatedSend, gatedApprove, gatedBlock, gatedMembers, listApprovals, cancelApproval, pendingApprovals } from './approvals';
@@ -76,7 +76,7 @@ async function callTool(env: Env, ctx: ExecutionContext, c: Caller, name: string
       try { bytes = unb64(a.base64); } catch { throw new HttpError(400, 'bad_request', 'base64 is not valid'); }
       return uploadAttachment(env, u, bytes);
     }
-    case 'send_message': return gatedSend(env, ctx, c, a);
+    case 'send_message': return finishing(ctx, gatedSend(env, ctx, c, a));
     case 'approve': return gatedApprove(env, ctx, c, String(a.actor ?? ''));
     case 'block': return gatedBlock(env, ctx, c, String(a.actor ?? ''));
     case 'change_members': return gatedMembers(env, ctx, c, { uri: String(a.threadId ?? ''), add: a.add, remove: a.remove });

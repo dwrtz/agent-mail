@@ -4,7 +4,7 @@
 import { chromium, Page } from 'playwright';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { Account, waitFor } from './lib';
-import { KeyFile } from '../src/shared/client';
+import { KeyFile, decryptActivity } from '../src/shared/client';
 import { main as cli } from '../cli/src/cli';
 import { b64url, randomBytes, sha256 } from '../src/shared/enc';
 
@@ -137,7 +137,8 @@ export async function runUi(o: UiOpts) {
       await shot(a, 'approvals');
       await a.getByRole('button', { name: 'Approve' }).click();
       await a.getByText('Nothing is waiting for you.').waitFor();
-      await waitFor('approved message at B', async () => (await o.B.api('/api/queue?limit=100')).items.find((x: any) => x.noteId === held.noteId), 40000);
+      const atB = await waitFor('approved message at B', async () => (await o.B.api('/api/queue?limit=100')).items.find((x: any) => x.noteId === held.noteId), 40000);
+      if ((await decryptActivity(o.B.keys, atB.activity)).content !== 'We accept the offer. I will sign on Friday.') throw new Error('B did not get the text the owner approved in the browser');
       await a.goto(`${o.A.base}/thread?uri=${encodeURIComponent(held.threadId)}`);
       await a.locator('.tag.agent').first().waitFor();
       if (!(await a.locator('.tag.agent').first().textContent())?.includes('Claude Code')) throw new Error('the agent tag should name the agent');

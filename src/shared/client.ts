@@ -63,6 +63,18 @@ export async function encryptAndSend(t: Transport, target: { to?: string[]; repl
   return t.send({ noteId: p.noteId, payloads, selfPayload, attachments: refs, ...(msg.sensitive ? { sensitive: true } : {}) });
 }
 
+/**
+ * The owner approving a message an agent wrote: opens the agent's copy with the owner's key and seals
+ * that same plaintext again for every recipient key. Only these ciphertexts are delivered, so what the
+ * recipients get is exactly what the owner read, whatever the agent sealed for them.
+ */
+export async function resealHeld(keys: KeyFile[], heldActivity: any, p: Prepared) {
+  const payload = await decryptActivity(keys, heldActivity);
+  const payloads = [];
+  for (const r of p.recipients) payloads.push(await sealFor(r, p.noteId, payload));
+  return { payload, payloads, selfPayload: await sealFor(p.self, p.noteId, payload) };
+}
+
 /** Decrypts a Create activity's Note with whichever of `keys` one of its ciphertexts (am:encrypted, am:copies) was sealed to. */
 export async function decryptActivity(keys: KeyFile[], activity: any): Promise<NotePayload> {
   const n = activity?.object;

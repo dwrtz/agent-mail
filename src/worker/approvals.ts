@@ -1,7 +1,7 @@
 // Owner approvals (R16). Agents act on their own; what their token says to ask about first is held here
 // until the owner approves or denies it in the web app. Only a signed-in owner can decide.
 import { Env, HttpError, nowIso, isoIn, Caller, requireScope, UserRow, parseJson, actorUrl } from './env';
-import { checkSend, deliver, send, changeMembers, SendBody } from './outbox';
+import { checkSend, deliver, send, changeMembers, refreshDraft, SendBody } from './outbox';
 import { approve, block, decide as policyFor } from './inboxq';
 import { isUrl } from '../shared/activity';
 
@@ -16,11 +16,13 @@ const held = (id: number, reason: string, extra: Record<string, unknown> = {}) =
 
 /** Records a held action, or returns the one already waiting for the same thing from this agent. */
 async function hold(env: Env, c: Caller, kind: Kind, reason: string, ref: string, subject: unknown, payload: unknown, extra: Record<string, unknown> = {}) {
-  const prior = await env.DB.prepare("SELECT id, reason FROM approvals WHERE user_id = ? AND kind = ? AND ref = ? AND token_id = ? AND status = 'pending'")
-    .bind(c.user.id, kind, ref, c.token!.id).first<{ id: number; reason: string }>();
+  // The same request again returns the approval already waiting; a different one about the same thing is its own approval.
+  const body = JSON.stringify(payload);
+  const prior = await env.DB.prepare("SELECT id, reason FROM approvals WHERE user_id = ? AND kind = ? AND ref = ? AND token_id = ? AND status = 'pending' AND payload = ?")
+    .bind(c.user.id, kind, ref, c.token!.id, body).first<{ id: number; reason: string }>();
   if (prior) return held(prior.id, prior.reason, extra);
   const row = await env.DB.prepare('INSERT INTO approvals (user_id, token_id, agent, kind, reason, ref, subject, payload, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
-    .bind(c.user.id, c.token!.id, c.token!.label, kind, reason, ref, JSON.stringify(subject), JSON.stringify(payload), nowIso(), isoIn(HOLD_SECONDS)).first<{ id: number }>();
+    .bind(c.user.id, c.token!.id, c.token!.label, kind, reason, ref, JSON.stringify(subject), body, nowIso(), isoIn(HOLD_SECONDS)).first<{ id: number }>();
   return held(row!.id, reason, extra);
 }
 
@@ -38,7 +40,9 @@ export async function gatedSend(env: Env, ctx: ExecutionContext, c: Caller, body
   const strangers: string[] = [];
   for (const x of ck.recipients) if ((await policyFor(env, c.user.id, x.actor)) !== 'allow') strangers.push(x.actor);
   const reason = body.sensitive === true ? 'agent_flagged' : ask.includes('all_sends') ? 'all_sends' : ask.includes('first_contact') && strangers.length ? 'first_contact' : '';
-  if (!reason) return deliver(env, ctx, c.user, ck, { agent: true });
+  // Sent at once. Letting someone new in (an allow rule) is a policy change: an agent's send adds one only
+  // when the token could have approved that sender by itself.
+  if (!reason) return deliver(env, ctx, c.user, ck, { agent: true, allowNew: c.token.scopes.includes('manage') && !ask.includes('policy') });
   await env.DB.prepare('UPDATE drafts SET expires_at = ? WHERE note_id = ?').bind(isoIn(HOLD_SECONDS), ck.noteId).run();
   const subject = { to: ck.recipients.map(x => x.actor), newContacts: strangers, thread: ck.thread, newThread: ck.newThread, inReplyTo: ck.inReplyTo, attachments: ck.attEntries.length };
   const payload: SendBody = { noteId: body.noteId, payloads: body.payloads, selfPayload: body.selfPayload, attachments: body.attachments ?? [] };
@@ -99,12 +103,40 @@ export async function pendingApprovals(env: Env, userId: number, tokenId: number
   return (await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE user_id = ?1 AND (?2 IS NULL OR token_id = ?2) AND status IN ('pending', 'approving')").bind(userId, tokenId).first<{ n: number }>())?.n ?? 0;
 }
 
-/** The owner's decision. Approving carries the held action out as the user. */
-export async function decideApproval(env: Env, ctx: ExecutionContext, user: UserRow, id: number, yes: boolean) {
+/** For a held message: the current keys of its recipients, so the owner's client can seal what the owner read. */
+export async function prepareApproval(env: Env, ctx: ExecutionContext, user: UserRow, id: number) {
+  const a = await env.DB.prepare("SELECT ref, kind, status FROM approvals WHERE id = ? AND user_id = ?").bind(id, user.id).first<{ ref: string; kind: Kind; status: string }>();
+  if (!a) throw new HttpError(404, 'not_found', 'no such approval');
+  if (a.kind !== 'send') throw new HttpError(400, 'bad_request', 'only a held message needs preparing');
+  if (a.status !== 'pending') throw new HttpError(409, 'already_decided', `this was already ${a.status}`);
+  return refreshDraft(env, ctx, user, a.ref);
+}
+
+const STALE_MS = 2 * 60_000;
+/** A failed send that the owner can simply try again (their sealing did not fit the draft, or it was mid-send). */
+const RETRYABLE = new Set(['bad_request', 'send_in_progress', 'too_large', 'no_encryption_key']);
+
+/**
+ * The owner's decision. Approving carries the held action out as the user.
+ * A held message is never sent as the agent sealed it: the server cannot see whether the copy the owner
+ * read and the copies for the recipients say the same thing. The owner's client opens the agent's copy
+ * and seals that plaintext again for every key (`sealed`), and only those ciphertexts are delivered.
+ */
+export async function decideApproval(env: Env, ctx: ExecutionContext, user: UserRow, id: number, yes: boolean, sealed: { payloads?: unknown; selfPayload?: unknown } = {}) {
   const a = await env.DB.prepare('SELECT * FROM approvals WHERE id = ? AND user_id = ?').bind(id, user.id).first<Row>();
   if (!a) throw new HttpError(404, 'not_found', 'no such approval');
-  const claim = await env.DB.prepare("UPDATE approvals SET status = ? WHERE id = ? AND status = 'pending'").bind(yes ? 'approving' : 'denied', id).run();
-  if (!claim.meta.changes) throw new HttpError(409, 'already_decided', `this was already ${a.status}`);
+  const now = nowIso();
+  if (a.status === 'pending' && a.expires_at < now) {
+    await env.DB.prepare("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ? AND status = 'pending'").bind(now, id).run();
+    throw new HttpError(410, 'approval_expired', 'this request expired');
+  }
+  if (yes && a.kind === 'send' && (!Array.isArray(sealed.payloads) || !sealed.selfPayload || typeof sealed.selfPayload !== 'object')) {
+    throw new HttpError(400, 'reseal_required', 'approving a message needs payloads and selfPayload sealed by the owner (POST /api/approvals/<id>/prepare gives the keys)');
+  }
+  // Claim it. A claim older than two minutes is one whose request died: it can be taken over (every action here is safe to repeat).
+  const claim = await env.DB.prepare("UPDATE approvals SET status = ?, decided_at = ? WHERE id = ? AND (status = 'pending' OR (status = 'approving' AND decided_at < ?))")
+    .bind(yes ? 'approving' : 'denied', now, id, new Date(Date.now() - STALE_MS).toISOString()).run();
+  if (!claim.meta.changes) throw new HttpError(409, 'already_decided', `this was already ${a.status === 'approving' ? 'approved and is being carried out' : a.status}`);
   const finish = async (status: string, result: unknown) => {
     await env.DB.prepare('UPDATE approvals SET status = ?, result = ?, decided_at = ? WHERE id = ?').bind(status, result === null ? null : JSON.stringify(result), nowIso(), id).run();
     return { id, status, result };
@@ -112,12 +144,16 @@ export async function decideApproval(env: Env, ctx: ExecutionContext, user: User
   if (!yes) return finish('denied', null);
   const p = parseJson<any>(a.payload, {});
   try {
-    const result = a.kind === 'send' ? await send(env, ctx, user, p, { agent: true })
+    const result = a.kind === 'send' ? await send(env, ctx, user, { noteId: p.noteId, payloads: sealed.payloads as SendBody['payloads'], selfPayload: sealed.selfPayload as SendBody['selfPayload'], attachments: p.attachments ?? [] }, { agent: true, allowNew: true })
       : a.kind === 'approve' ? await approve(env, ctx, user.id, p.actor)
       : a.kind === 'block' ? await block(env, user.id, p.actor)
       : await changeMembers(env, ctx, user, p);
     return finish('approved', result);
   } catch (e) {
+    if (e instanceof HttpError && a.kind === 'send' && RETRYABLE.has(e.code)) {
+      await env.DB.prepare("UPDATE approvals SET status = 'pending', decided_at = NULL WHERE id = ? AND status = 'approving'").bind(id).run();
+      throw e;
+    }
     if (!(e instanceof HttpError)) { await finish('failed', { error: 'internal', detail: 'internal error' }); throw e; }
     return finish('failed', { error: e.code, detail: e.message });
   }

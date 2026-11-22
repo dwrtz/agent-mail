@@ -35,6 +35,7 @@ Wait
 
 Serve
   mcp                              a local MCP server (stdio) with plaintext tools: read_inbox, reply, send, ...
+                                   Files it attaches or saves stay inside AGENT_MAIL_FILES (default ./agent-mail-files).
 
 Env: AGENT_MAIL_CONFIG (the agent file from Settings: a path, or the JSON itself)
   or AGENT_MAIL_URL, AGENT_MAIL_TOKEN, AGENT_MAIL_KEY (key file path(s), comma-separated, or the JSON itself)`;
@@ -55,7 +56,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
   const [cmd, ...args] = argv;
   if (!cmd || cmd === 'help' || cmd === '--help') { log(usage); return; }
   const agent = new Agent(loadConfig(env));
-  if (cmd === 'mcp') return serveStdio(agent);
+  if (cmd === 'mcp') return serveStdio(agent, env.AGENT_MAIL_FILES || 'agent-mail-files');
   await agent.connect();
   const mcp = agent.mcp;
   const print = <T>(r: T, pretty = false): T => { log(JSON.stringify(r, null, pretty ? 2 : undefined)); return r; };

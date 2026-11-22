@@ -4,7 +4,7 @@ import { Env, HttpError, json, nowIso, actorUrl, addressOf, UserRow, parseJson, 
 import { encKeys, clientKeys, nextKeyN } from './keys';
 import { pull, ack, listRequests, setRule, counts, doorbell, unreadMessages } from './inboxq';
 import { resolveMany, prepare, markRead } from './outbox';
-import { gatedSend, gatedApprove, gatedBlock, gatedMembers, listApprovals, decideApproval, cancelApproval, pendingApprovals } from './approvals';
+import { gatedSend, gatedApprove, gatedBlock, gatedMembers, listApprovals, decideApproval, prepareApproval, cancelApproval, pendingApprovals } from './approvals';
 import { createToken, revokeToken } from './auth';
 import { oauthClientInfo, oauthApprove } from './oauth';
 import { signedFetch } from './federation';
@@ -15,15 +15,21 @@ import { normalizeDoorbellHeader, normalizeDoorbellValue, parseDoorbellExtra } f
 export async function meInfo(env: Env, c: Caller) {
   const u = c.user;
   const actor = actorUrl(env, u.handle);
-  return {
-    handle: u.handle, name: u.name, ...(c.token ? {} : { email: u.email }), actor, address: addressOf(env, u.handle), readReceipts: !!u.read_receipts,
+  const keys = await clientKeys(env, u.id);
+  const base = {
+    handle: u.handle, name: u.name, actor, address: addressOf(env, u.handle), readReceipts: !!u.read_receipts,
     encKeys: (await encKeys(env, u.id)).map(k => ({ n: k.n, keyId: `${actor}#enc-${k.n}`, publicKey: k.public_key })),
-    clientKeys: (await clientKeys(env, u.id)).map(k => ({ n: k.n, keyId: `${actor}#enc-${k.n}`, publicKey: k.public_key, label: k.label, tokenId: k.token_id })),
-    doorbell: { url: u.doorbell_url ?? '', header: u.doorbell_header ?? 'Authorization', valueSet: !!u.doorbell_value, extra: Object.keys(parseJson<Record<string, string>>(u.doorbell_extra, {})) },
     ...(await counts(env, u.id, consumerOf(c))),
     unreadMessages: await unreadMessages(env, u.id),
     approvals: await pendingApprovals(env, u.id, c.token?.id ?? null),
-    ...(c.token ? { token: { label: c.token.label, scopes: c.token.scopes, ask: c.token.ask } } : {}),
+  };
+  // An agent learns about itself and the keys mail is sealed to (all public). The email, the doorbell
+  // (a webhook URL is often a secret in itself) and the other agents are the owner's to see.
+  if (c.token) return { ...base, clientKeys: keys.map(k => ({ n: k.n, keyId: `${actor}#enc-${k.n}`, publicKey: k.public_key })), token: { label: c.token.label, scopes: c.token.scopes, ask: c.token.ask } };
+  return {
+    ...base, email: u.email,
+    clientKeys: keys.map(k => ({ n: k.n, keyId: `${actor}#enc-${k.n}`, publicKey: k.public_key, label: k.label, tokenId: k.token_id })),
+    doorbell: { url: u.doorbell_url ?? '', header: u.doorbell_header ?? 'Authorization', valueSet: !!u.doorbell_value, extra: Object.keys(parseJson<Record<string, string>>(u.doorbell_extra, {})) },
   };
 }
 
@@ -176,11 +182,13 @@ export async function ownerApi(req: Request, env: Env, ctx: ExecutionContext, c:
   if (dt && m === 'DELETE') { owner(); await revokeToken(env, u.id, Number(dt[1])); return json({}); }
   if (path === '/api/rules' && m === 'PUT') { owner(); const b = await body(req); await setRule(env, u.id, String(b.subject ?? ''), b.action); return json({}); }
   if (path === '/api/rules' && m === 'DELETE') { owner(); await env.DB.prepare('DELETE FROM rules WHERE user_id = ? AND subject = ?').bind(u.id, url.searchParams.get('subject') ?? '').run(); return json({}); }
-  const da = /^\/api\/approvals\/(\d+)\/(approve|deny|cancel)$/.exec(path);
+  const da = /^\/api\/approvals\/(\d+)\/(approve|deny|cancel|prepare)$/.exec(path);
   if (da && m === 'POST') {
     if (da[2] === 'cancel') return json(await cancelApproval(env, c, Number(da[1])));
     owner();
-    return json(await decideApproval(env, ctx, u, Number(da[1]), da[2] === 'approve'));
+    if (da[2] === 'prepare') return json(await prepareApproval(env, ctx, u, Number(da[1])));
+    // Carried out to the end even if the browser goes away while it runs.
+    return json(await finishing(ctx, decideApproval(env, ctx, u, Number(da[1]), da[2] === 'approve', da[2] === 'approve' ? await body(req).catch(() => ({})) : {})));
   }
   if (path === '/api/oauth/client' && m === 'GET') { owner(); return json(await oauthClientInfo(env, ctx, url.searchParams)); }
   if (path === '/api/oauth/approve' && m === 'POST') { owner(); return json(await oauthApprove(env, ctx, u, await body(req))); }
@@ -194,7 +202,7 @@ export async function ownerApi(req: Request, env: Env, ctx: ExecutionContext, c:
   if (path === '/api/requests' && m === 'GET') { can('read'); return json(await listRequests(env, u.id)); }
   if (path === '/api/rules' && m === 'GET') { can('read'); return json((await env.DB.prepare('SELECT subject, action, created_at FROM rules WHERE user_id = ? ORDER BY created_at').bind(u.id).all()).results); }
   if (path === '/api/messages/read' && m === 'POST') { can('read'); return json(await markRead(env, ctx, u, (await body(req)).noteIds)); }
-  if (path === '/api/approvals' && m === 'GET') { can('read'); return json(await listApprovals(env, c, url.searchParams.get('status') ?? 'recent')); }
+  if (path === '/api/approvals' && m === 'GET') return json(await listApprovals(env, c, url.searchParams.get('status') ?? 'recent'));
   if (path === '/api/attachments/fetch' && m === 'POST') {
     can('read');
     const bytes = await fetchAttachment(env, ctx, u, await body(req));
@@ -212,8 +220,14 @@ export async function ownerApi(req: Request, env: Env, ctx: ExecutionContext, c:
   throw new HttpError(404, 'not_found', 'no such route');
 }
 
+/** Lets work that changes state run to its end even if the client disconnects while waiting for the answer. */
+export function finishing<T>(ctx: ExecutionContext, p: Promise<T>): Promise<T> {
+  ctx.waitUntil(p.then(() => {}, () => {}));
+  return p;
+}
+
 export async function sendFromApi(env: Env, ctx: ExecutionContext, c: Caller, req: Request) {
-  return json(await gatedSend(env, ctx, c, await body(req)), 202);
+  return json(await finishing(ctx, gatedSend(env, ctx, c, await body(req))), 202);
 }
 
 async function sized(req: Request): Promise<ArrayBuffer> {

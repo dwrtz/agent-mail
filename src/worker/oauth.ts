@@ -120,6 +120,7 @@ async function authRequest(env: Env, ctx: ExecutionContext, get: (k: string) => 
   if (!/^[A-Za-z0-9_-]{43}$/.test(challenge) || get('code_challenge_method') !== 'S256') throw bad('PKCE with code_challenge_method=S256 is required.');
   const resource = get('resource');
   if (resource && !resource.startsWith(origin(env))) throw new HttpError(400, 'invalid_target', 'This instance only issues tokens for its own MCP endpoint.');
+  await touchClient(env, client.client_id);
   const asked = pick(get('scope'), SCOPES);
   return { client, redirectUri, state: get('state').slice(0, 2000), challenge, scopes: asked.length ? asked : [...SCOPES] };
 }
@@ -151,12 +152,18 @@ export async function oauthApprove(env: Env, ctx: ExecutionContext, u: UserRow, 
 }
 
 // ---- the token endpoint ----
-async function issue(env: Env, tokenId: number, clientId: string, scopes: string) {
+/** Issues a token pair for a grant, but only while the grant still exists (it may be revoked at any moment). */
+async function issue(env: Env, tokenId: number, clientId: string) {
   const access = 'amo_' + b64url(randomBytes(32)), refresh = 'amr_' + b64url(randomBytes(32));
-  await env.DB.prepare('INSERT INTO oauth_tokens (access_hash, refresh_hash, token_id, client_id, access_expires_at, refresh_expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+  const grant = await env.DB.prepare("SELECT scopes FROM api_tokens WHERE id = ? AND kind = 'oauth' AND client_id = ?").bind(tokenId, clientId).first<{ scopes: string }>();
+  // The insert checks again in the same statement: a revoke that lands in between leaves no token behind.
+  const r = grant && await env.DB.prepare(`INSERT INTO oauth_tokens (access_hash, refresh_hash, token_id, client_id, access_expires_at, refresh_expires_at)
+      SELECT ?1, ?2, t.id, ?4, ?5, ?6 FROM api_tokens t WHERE t.id = ?3 AND t.kind = 'oauth' AND t.client_id = ?4`)
     .bind(hex(await sha256(access)), hex(await sha256(refresh)), tokenId, clientId, isoIn(ACCESS_SECONDS), isoIn(REFRESH_SECONDS)).run();
-  return json({ access_token: access, token_type: 'Bearer', expires_in: ACCESS_SECONDS, refresh_token: refresh, scope: scopes }, 200, { ...CORS, 'cache-control': 'no-store', pragma: 'no-cache' });
+  if (!grant || !r?.meta.changes) return oauthError('invalid_grant', 'access was revoked');
+  return json({ access_token: access, token_type: 'Bearer', expires_in: ACCESS_SECONDS, refresh_token: refresh, scope: grant.scopes }, 200, { ...CORS, 'cache-control': 'no-store', pragma: 'no-cache' });
 }
+const touchClient = (env: Env, clientId: string) => env.DB.prepare("UPDATE oauth_clients SET fetched_at = ? WHERE client_id = ? AND source = 'registered'").bind(nowIso(), clientId).run();
 
 async function token(req: Request, env: Env): Promise<Response> {
   let p: Record<string, string> = {};
@@ -175,17 +182,24 @@ async function token(req: Request, env: Env): Promise<Response> {
     if (p.redirect_uri && !redirectMatches(c.redirect_uri, p.redirect_uri)) return oauthError('invalid_grant', 'redirect_uri does not match the authorization request');
     if (!/^[A-Za-z0-9._~-]{43,128}$/.test(p.code_verifier) || b64url(await sha256(p.code_verifier)) !== c.challenge) return oauthError('invalid_grant', 'code_verifier does not match the code challenge');
     const t = await createToken(env, c.user_id, { kind: 'oauth', label: c.client_name, scopes: c.scopes, ask: c.ask, clientId: c.client_id });
-    return issue(env, t.id, c.client_id, c.scopes);
+    await touchClient(env, c.client_id);
+    return issue(env, t.id, c.client_id);
   }
   if (p.grant_type === 'refresh_token') {
     if (!p.refresh_token) return oauthError('invalid_request', 'refresh_token is required');
-    // Rotation: the old pair is deleted as it is read, so a refresh token works once.
-    const r = await env.DB.prepare('DELETE FROM oauth_tokens WHERE refresh_hash = ? RETURNING token_id, client_id, refresh_expires_at').bind(hex(await sha256(p.refresh_token))).first<{ token_id: number; client_id: string; refresh_expires_at: string }>();
-    if (!r || r.refresh_expires_at < nowIso()) return oauthError('invalid_grant', 'the refresh token is unknown, used or expired');
+    const hash = hex(await sha256(p.refresh_token));
+    const r = await env.DB.prepare('SELECT token_id, client_id, refresh_expires_at, rotated_at FROM oauth_tokens WHERE refresh_hash = ?').bind(hash).first<{ token_id: number; client_id: string; refresh_expires_at: string; rotated_at: string | null }>();
+    if (!r || r.refresh_expires_at < nowIso()) return oauthError('invalid_grant', 'the refresh token is unknown or expired');
     if (p.client_id && p.client_id !== r.client_id) return oauthError('invalid_grant', 'the refresh token was issued to another client');
-    const grant = await env.DB.prepare('SELECT scopes FROM api_tokens WHERE id = ?').bind(r.token_id).first<{ scopes: string }>();
-    if (!grant) return oauthError('invalid_grant', 'access was revoked');
-    return issue(env, r.token_id, r.client_id, grant.scopes);
+    // A refresh token works once. Marking it used (rather than deleting it) lets a second use be recognised:
+    // that means the token leaked, so every token of the grant ends and the app has to be connected again.
+    const used = r.rotated_at ? null : await env.DB.prepare('UPDATE oauth_tokens SET rotated_at = ?, access_expires_at = ? WHERE refresh_hash = ? AND rotated_at IS NULL').bind(nowIso(), nowIso(), hash).run();
+    if (!used?.meta.changes) {
+      await env.DB.prepare('DELETE FROM oauth_tokens WHERE token_id = ? AND rotated_at IS NULL').bind(r.token_id).run();
+      return oauthError('invalid_grant', 'the refresh token was already used; connect the app again');
+    }
+    await touchClient(env, r.client_id);
+    return issue(env, r.token_id, r.client_id);
   }
   return oauthError('unsupported_grant_type', 'use authorization_code or refresh_token');
 }

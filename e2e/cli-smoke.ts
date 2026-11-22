@@ -71,7 +71,8 @@ async function main() {
   check('watch --once prints one line when mail arrives and exits', quiet === '' && code === 0 && JSON.parse(watchOut.trim()).unread >= 1, `exit ${code}: ${watchOut.trim()}`);
 
   // agent-mail mcp: a local MCP server over stdio with plaintext tools
-  const srv = spawn('node', ['cli/agent-mail.mjs', 'mcp'], { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, AGENT_MAIL_CONFIG: agentFile } });
+  mkdirSync('.e2e/cli/files', { recursive: true });
+  const srv = spawn('node', ['cli/agent-mail.mjs', 'mcp'], { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, AGENT_MAIL_CONFIG: agentFile, AGENT_MAIL_FILES: '.e2e/cli/files' } });
   let buf = ''; const waiting = new Map<number, (m: any) => void>();
   srv.stdout!.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line.trim()) { const m = JSON.parse(line); waiting.get(m.id)?.(m); } } });
   let n = 0;
@@ -94,8 +95,17 @@ async function main() {
     cli(A, 'reply', String(back.noteId), 'One more for wait_for_mail');
     const woke = await wait;
     check('local MCP: wait_for_mail returns when mail arrives', woke.unread >= 1 && !woke.timedOut, JSON.stringify(woke));
-    const bad = await rpc('tools/call', { name: 'save_attachment', arguments: { noteId: 'https://nope.example/notes/x', path: '.e2e/cli/x' } });
+    const bad = await rpc('tools/call', { name: 'save_attachment', arguments: { noteId: 'https://nope.example/notes/x', path: 'x.bin' } });
     check('local MCP: a failing tool answers isError, not a crash', bad.isError === true && (await rpc('ping')) !== undefined, bad.content?.[0]?.text?.slice(0, 80));
+    // Files: only inside the agent's folder, and never a key.
+    const outside = await rpc('tools/call', { name: 'reply', arguments: { noteId: msg.noteId, text: 'x', attach: ['../bob.json'] } });
+    const escape = await rpc('tools/call', { name: 'save_attachment', arguments: { noteId: msg.noteId, path: '/tmp/agent-mail-escape.txt' } });
+    writeFileSync('.e2e/cli/files/leak.json', agentFile);
+    writeFileSync('.e2e/cli/files/ok.txt', 'a file the agent may send');
+    const leak = await rpc('tools/call', { name: 'reply', arguments: { noteId: msg.noteId, text: 'x', attach: ['leak.json'] } });
+    const fine = await tool('reply', { noteId: msg.noteId, text: 'With a file from my folder', attach: ['ok.txt'] });
+    check('local MCP: files outside its folder and key files are refused', outside.isError && /must be inside/.test(outside.content[0].text) && escape.isError && /must be inside/.test(escape.content[0].text) && leak.isError && /not sent/.test(leak.content[0].text) && fine.status === 'sent',
+      [outside, escape, leak].map(x => x.content?.[0]?.text?.slice(0, 50)).join(' | '));
   } catch (e) { check('local MCP', false, String(e)); }
   srv.stdin!.end();
   const srvExit = await Promise.race([new Promise<number | null>(res => srv.on('exit', res)), new Promise<string>(r => setTimeout(() => r('timeout'), 10000))]);

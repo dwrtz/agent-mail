@@ -128,17 +128,21 @@ CREATE TABLE mcp_sessions (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, subscr
 `0002_agents.sql` (0.2):
 
 ```sql
-ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT 'read send manage';
-ALTER TABLE api_tokens ADD COLUMN ask TEXT NOT NULL DEFAULT 'first_contact policy members';
-ALTER TABLE api_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'token'; /* token | oauth */
-ALTER TABLE api_tokens ADD COLUMN client_id TEXT;
+-- api_tokens is rebuilt with AUTOINCREMENT: a token id is never given to a later token.
+CREATE TABLE api_tokens_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, label TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_used_at TEXT,
+  scopes TEXT NOT NULL DEFAULT 'read send manage', ask TEXT NOT NULL DEFAULT 'first_contact policy members',
+  kind TEXT NOT NULL DEFAULT 'token' /* token | oauth */, client_id TEXT);
+INSERT INTO api_tokens_v2 (id, user_id, label, token_hash, created_at, last_used_at) SELECT id, user_id, label, token_hash, created_at, last_used_at FROM api_tokens;
+DROP TABLE api_tokens;
+ALTER TABLE api_tokens_v2 RENAME TO api_tokens;
 ALTER TABLE enc_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'primary'; /* primary | client */
 ALTER TABLE enc_keys ADD COLUMN label TEXT;
 ALTER TABLE enc_keys ADD COLUMN token_id INTEGER; /* a client key goes away with its token */
 ALTER TABLE users ADD COLUMN key_seq INTEGER NOT NULL DEFAULT 0; /* key numbers are never reused */
 ALTER TABLE users ADD COLUMN doorbell_extra TEXT; /* JSON {"header-name":"value"} */
 ALTER TABLE drafts ADD COLUMN sent_result TEXT;   /* set once sent: a repeated send answers the same */
-CREATE TABLE approvals (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, token_id INTEGER, agent TEXT NOT NULL,
+CREATE TABLE approvals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, token_id INTEGER, agent TEXT NOT NULL,
   kind TEXT NOT NULL /* send | approve | block | members */, reason TEXT NOT NULL /* first_contact | policy | members | all_sends | agent_flagged */,
   ref TEXT NOT NULL /* note id, actor or thread */, subject TEXT NOT NULL /* JSON, shown to the owner */,
   payload TEXT NOT NULL /* JSON, the held call */, status TEXT NOT NULL DEFAULT 'pending' /* pending | approved | denied | cancelled | expired | failed */,
@@ -155,7 +159,8 @@ CREATE TABLE oauth_clients (client_id TEXT PRIMARY KEY, name TEXT NOT NULL, redi
 CREATE TABLE oauth_codes (code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, client_id TEXT NOT NULL, client_name TEXT NOT NULL,
   redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, scopes TEXT NOT NULL, ask TEXT NOT NULL, expires_at TEXT NOT NULL);
 CREATE TABLE oauth_tokens (access_hash TEXT PRIMARY KEY, refresh_hash TEXT NOT NULL UNIQUE, token_id INTEGER NOT NULL, client_id TEXT NOT NULL,
-  access_expires_at TEXT NOT NULL, refresh_expires_at TEXT NOT NULL);
+  access_expires_at TEXT NOT NULL, refresh_expires_at TEXT NOT NULL,
+  rotated_at TEXT /* set when the refresh token was used; seeing it again ends the grant */);
 CREATE INDEX oauth_tokens_token ON oauth_tokens(token_id);
 ```
 
@@ -166,11 +171,21 @@ that moment.
 
 An OAuth grant is an `api_tokens` row of kind `oauth` whose `token_hash`
 is a value no bearer can hash to; its access and refresh tokens are rows
-in `oauth_tokens`, stored hashed.
+in `oauth_tokens`, stored hashed. An access token counts only while its
+row is not rotated and its grant row exists with the same `client_id`. A
+used refresh token's row is kept with `rotated_at` set until it expires,
+so that a second use is recognised; a new pair is inserted only by a
+statement that also checks the grant exists.
 
 A sent draft is kept for one hour with `sent_result` set (the JSON answer;
-`'sending'` while the first call runs), so that a repeated send for the
-same Note answers from it. `drafts.seq` is the provisional number from
+`'sending:<time>'` while the first call runs, taken over by another call
+when it is more than a minute old), so that a repeated send for the same
+Note answers from it. One send is one `DB.batch`: the thread row, the
+sender's `messages` row, one `deliveries` row per recipient, attachment
+grants, allow rules and the draft's `sent_result`. Queue messages are sent
+after it commits. An approval being carried out has status `approving`
+with `decided_at` = when it was claimed; after two minutes it can be
+claimed again. `drafts.seq` is the provisional number from
 prepare; the real `am:seq` is taken from `seqs` when the message is sent
 (`INSERT ... ON CONFLICT DO UPDATE SET last = last + 1 RETURNING last`).
 
@@ -187,8 +202,10 @@ message is waiting to ring at that time, so at most one is queued.
 Cron (every 15 min): delete expired nonces, sessions, drafts, `rate` rows
 older than 2 minutes, actor cache older than 1 day, MCP sessions idle for a
 day, expired OAuth codes and refresh tokens, registered OAuth clients older
-than 7 days that no grant uses; mark pending approvals past `expires_at`
-as `expired`; delete decided approvals older than 90 days.
+than 7 days that were never used, or not used for 90 days, and that no
+grant uses; mark pending approvals past `expires_at` as `expired`; delete
+decided approvals older than 90 days; queue again up to 50 deliveries that
+are `queued`, never attempted and older than 10 minutes.
 
 ## Local delivery
 
@@ -214,7 +231,7 @@ name = the owner, or a token with that scope (else 403
 | POST /api/auth/signup | (no auth) | `{email,password,handle,name}` | `{ok:true}` + cookie |
 | POST /api/auth/login | (no auth) | `{email,password}` | `{ok:true}` + cookie |
 | POST /api/auth/logout | | | `{}` |
-| GET /api/me | any | | `{user:{handle,name,email,actor,address,readReceipts,encKeys:[{n,keyId,publicKey}],clientKeys:[{n,keyId,publicKey,label,tokenId}],doorbell:{url,header,valueSet,extra:[names]},unread,requests,latestCursor,unreadMessages,approvals}}`; for a token, no `email`, and `token:{label,scopes,ask}` |
+| GET /api/me | any | | `{user:{handle,name,email,actor,address,readReceipts,encKeys:[{n,keyId,publicKey}],clientKeys:[{n,keyId,publicKey,label,tokenId}],doorbell:{url,header,valueSet,extra:[names]},unread,requests,latestCursor,unreadMessages,approvals}}`; for a token: no `email`, no `doorbell`, `clientKeys` without `label` and `tokenId`, and `token:{label,scopes,ask}` |
 | PUT /api/keys/encryption | owner | `{publicKey}` (base64url raw X25519) | `{keyId}`; same key twice is a no-op |
 | DELETE /api/keys/encryption/:n | owner | | `{}` (cannot delete the only key or the newest key) |
 | PUT /api/keys/client | owner | `{publicKey,label?,tokenId?}` | `{keyId,n}`; at most 4 (400 `too_many_keys`) |
@@ -225,7 +242,9 @@ name = the owner, or a token with that scope (else 403
 | POST /api/tokens | owner | `{label,scopes?,ask?}` (scopes default to all three, ask to the default list) | `{token,id,scopes,ask}` (token shown once) |
 | DELETE /api/tokens/:id | owner | | `{}` |
 | PUT /api/rules, DELETE /api/rules?subject= | owner | `{subject,action}` | `{}` |
-| POST /api/approvals/:id/approve, /deny | owner | | `{id,status,result}`; 409 `already_decided` |
+| POST /api/approvals/:id/prepare | owner | | for a held message: `{noteId,threadId,seq,recipients:[{actor,handle,keyId,publicKey,alsoKeys}],self:{actor,keyId,publicKey,alsoKeys}}` with the recipients' keys looked up again |
+| POST /api/approvals/:id/approve | owner | for a held message `{payloads,selfPayload}`, sealed by the owner's client from the agent's copy (else 400 `reseal_required`); otherwise `{}` | `{id,status,result}`; 409 `already_decided`; 410 `approval_expired` |
+| POST /api/approvals/:id/deny | owner | | `{id,status:"denied",result:null}` |
 | GET /api/oauth/client | owner | the authorization request's query | `{clientId,name,redirectUri,redirectHost,state,scopes,defaultAsk,resource}`; 400 `invalid_request` |
 | POST /api/oauth/approve | owner | `{allow,params,scopes?,ask?}` | `{redirect}` |
 | POST /api/resolve | read | `{to:[handle or actor URL]}` | `{actors:[{actor,handle,name,inbox,keyId,publicKey,alsoKeys:[{keyId,publicKey}]}]}` |
@@ -237,7 +256,7 @@ name = the owner, or a token with that scope (else 403
 | GET /api/rules | read | | `[{subject,action,created_at}]` |
 | POST /api/messages/read | read | `{noteIds:[...]}` | `{marked,receiptsSent}` |
 | POST /api/attachments/fetch | read | `{url,size,digest}` | bytes |
-| GET /api/approvals?status= | read | `recent` (default: pending, or made in the last 7 days) or `pending` | `{items:[{id,agent,kind,reason,status,subject,createdAt,decidedAt,expiresAt,result}]}`; the owner sees every agent's and, for a pending send, `activity` (the sender's own ciphertext, to decrypt and show); a token sees its own |
+| GET /api/approvals?status= | any | `recent` (default: pending, or made in the last 7 days) or `pending` | `{items:[{id,agent,kind,reason,status,subject,createdAt,decidedAt,expiresAt,result}]}`; the owner sees every agent's and, for a pending send, `activity` (the sender's own ciphertext, to decrypt and show); a token sees its own |
 | POST /api/approvals/:id/cancel | any | | `{id,status:"cancelled"}` (a token: its own pending one) |
 | POST /api/outbox/prepare | send | `{to?:[...], replyTo?: noteId, threadId?: string}` | `{noteId,activityId,threadId,seq,members,recipients:[{actor,handle,keyId,publicKey,alsoKeys}],self:{actor,keyId,publicKey,alsoKeys},info,aadFormat,suite}` |
 | POST /api/attachments | send | raw bytes, `Content-Type: application/octet-stream` | `{url,size,digest}` |
@@ -327,7 +346,11 @@ runs it; `cli/package.json` publishes the same file to npm.
 Settings from the environment: `AGENT_MAIL_CONFIG` (an agent file: a path,
 or the JSON itself), or `AGENT_MAIL_URL`, `AGENT_MAIL_TOKEN` and
 `AGENT_MAIL_KEY` (key file paths, comma-separated, or the JSON itself).
-`AGENT_MAIL_NAME` overrides the agent's name. It talks to `/mcp`, and to
+`AGENT_MAIL_NAME` overrides the agent's name. `AGENT_MAIL_FILES` (default
+`./agent-mail-files`) is the one folder the local MCP server reads
+attachments from and saves them to; a path that resolves outside it is
+refused. A file that is an Agent Mail key or agent file is never attached,
+by the server or by the commands. It talks to `/mcp`, and to
 `/api/attachments` for uploads and large downloads.
 
 Commands (each prints JSON): `whoami`, `pull [--since N] [--limit N]`
@@ -410,7 +433,10 @@ Contacts, Settings, with counts) and a compact top bar on mobile (brand, then a 
   message: "New message to" or "Reply to" the recipients, and the subject,
   text and attachment names decrypted in the browser; for the others, the
   sender or the member change), the reason in a sentence, Approve and
-  Deny. A failure to carry it out is shown on the card. Empty: "Nothing is
+  Deny. Approving a message asks for the recipients' keys, seals the text
+  that is shown again for each of them in the browser, and submits that;
+  when the browser cannot open the agent's copy, Approve is disabled and
+  the card says so. A failure to carry it out is shown on the card. Empty: "Nothing is
   waiting for you." Below, "Recently decided": agent, kind, outcome, time.
 - **Contacts** (`/contacts`): rules table, add an actor or `domain:host`
   as Allow or Block, remove.

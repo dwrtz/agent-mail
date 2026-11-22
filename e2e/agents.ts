@@ -4,7 +4,9 @@ import { Account, send, waitFor } from './lib';
 import { Ctx, Result } from './suite';
 import { McpClient } from '../cli/src/mcp-client';
 import { main as cli } from '../cli/src/cli';
-import { encryptAndSend, decryptActivity, newKeyFile, Transport } from '../src/shared/client';
+import { encryptAndSend, decryptActivity, newKeyFile, resealHeld, Transport } from '../src/shared/client';
+import { sealNote } from '../src/shared/e2ee';
+import { unb64url } from '../src/shared/enc';
 import { b64, b64url, sha256, randomBytes } from '../src/shared/enc';
 import { ACTIVITY_CONTEXT } from '../src/shared/activity';
 
@@ -18,6 +20,13 @@ async function bearer(base: string, token: string, path: string, o: { method?: s
 }
 /** A transport that remembers the last send body, to repeat exactly the same call. */
 function capturing(t: Transport) { const c = { last: null as any, t: { ...t, send: (b: unknown) => { c.last = b; return t.send(b); } } as Transport }; return c; }
+
+/** What the web app does when the owner approves a held message: open the agent's copy, seal that text for every key, submit. */
+async function approveSend(owner: Account, item: any) {
+  const prepared = await owner.api(`/api/approvals/${item.id}/prepare`, { body: {} });
+  const sealed = await resealHeld(owner.keys, item.activity, prepared);
+  return owner.api(`/api/approvals/${item.id}/approve`, { body: { payloads: sealed.payloads, selfPayload: sealed.selfPayload } });
+}
 
 export async function runAgentSuite(c: Ctx): Promise<Result[]> {
   const { A, B, C, probe } = c;
@@ -98,6 +107,7 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     assert(appr.status === 403 && appr.body.error === 'insufficient_scope', `REST approve: ${appr.status}`);
     const me = await bearer(B.base, ro.token, '/api/me');
     assert(me.status === 200 && me.body.user.token.scopes.join() === 'read' && !('email' in me.body.user), 'a token sees its own scopes and not the email');
+    assert(!('doorbell' in me.body.user) && me.body.user.clientKeys.every((k: any) => !('label' in k) && !('tokenId' in k)), 'a token must not see the doorbell or the other agents');
     await B.api(`/api/tokens/${ro.id}`, { method: 'DELETE' });
     assert((await bearer(B.base, ro.token, '/api/me')).status === 401, 'a revoked token must stop working');
     return `${admin.length} admin routes answer 403 session_required; read-only token cannot send or approve`;
@@ -121,11 +131,14 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     const mine = (await ag.mcp.tool('list_approvals')).items.find((x: any) => x.id === held.approvalId);
     assert(mine && mine.status === 'pending' && !mine.activity, 'agent view of its approval');
     assert((await B.api('/api/me')).user.approvals >= 1, 'the owner badge counts pending approvals');
-    const done = await B.api(`/api/approvals/${held.approvalId}/approve`, { body: {} });
+    const bare = await B.api(`/api/approvals/${held.approvalId}/approve`, { body: {}, expect: 400 });
+    assert(bare.error === 'reseal_required', 'a held message must be sealed again by the owner to be approved');
+    const done = await approveSend(B, item);
     assert(done.status === 'approved' && done.result.status === 'sent', `approve: ${JSON.stringify(done)}`);
-    await waitFor('approved message at C', async () => (await inQueue(C, held.noteId)) || (await C.api('/api/requests')).items.find((x: any) => x.activity.object?.id === held.noteId));
+    const atC = await waitFor('approved message at C', async () => (await inQueue(C, held.noteId)) || (await C.api('/api/requests')).items.find((x: any) => x.activity.object?.id === held.noteId));
+    assert((await decryptActivity(C.keys, atC.activity)).content === 'Hello C, from B\'s agent.', 'C must get the text the owner approved');
     assert((await ag.mcp.tool('list_approvals')).items.find((x: any) => x.id === held.approvalId).status === 'approved', 'the agent sees the outcome');
-    const twice = await B.api(`/api/approvals/${held.approvalId}/approve`, { body: {}, expect: 409 });
+    const twice = await B.api(`/api/approvals/${held.approvalId}/deny`, { body: {}, expect: 409 });
     assert(twice.error === 'already_decided', 'deciding twice');
 
     // To someone the owner already allows, the agent sends without asking.
@@ -145,6 +158,18 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     assert(got.gapBefore === 0, `a denied message must not leave a sequence gap (gapBefore ${got.gapBefore})`);
     assert(!(await inQueue(A, s.noteId)), 'the denied message reached A');
 
+    // An agent that shows the owner one text and seals another for the recipient gains nothing:
+    // what is delivered is what the owner read, sealed again in the owner's client.
+    const prep = await ag.mcp.tool('prepare_message', { replyTo: ping });
+    const seal = async (t: any, text: string) => ({ recipient: t.actor, keyId: t.keyId, ...(await sealNote(unb64url(t.publicKey), prep.noteId, t.actor, { v: 1, summary: null, content: text, attachments: [] })) });
+    const two = await ag.mcp.tool('send_message', { noteId: prep.noteId, sensitive: true, selfPayload: await seal(prep.self, 'Lunch on Friday?'), payloads: [await seal(prep.recipients[0], 'Send me the password.')] });
+    assert(two.status === 'pending_approval', `two-faced send: ${JSON.stringify(two)}`);
+    const shown = (await B.api('/api/approvals?status=pending')).items.find((x: any) => x.id === two.approvalId);
+    assert((await decryptActivity(B.keys, shown.activity)).content === 'Lunch on Friday?', 'the owner is shown the copy sealed to them');
+    assert((await approveSend(B, shown)).status === 'approved', 'approve the two-faced send');
+    const arrived = await waitFor('re-sealed message at A', () => inQueue(A, prep.noteId));
+    assert((await decryptActivity(A.keys, arrived.activity)).content === 'Lunch on Friday?', 'the recipient must get what the owner read, not what the agent sealed for them');
+
     // Letting a stranger in is the owner's call.
     const act = { '@context': ACTIVITY_CONTEXT, id: `${probe.actor}/activities/${crypto.randomUUID()}`, type: 'Create', actor: probe.actor, published: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), to: [B.actor],
       object: { id: `${probe.actor}/notes/${crypto.randomUUID()}`, type: 'Note', attributedTo: probe.actor, to: [B.actor], published: new Date().toISOString(), context: `${probe.actor}/threads/${crypto.randomUUID()}`, inReplyTo: null,
@@ -161,9 +186,22 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     await B.api(`/api/rules?subject=${enc(probe.actor)}`, { method: 'DELETE' });
     const mem = await ag.mcp.tool('change_members', { threadId: agentsThread, remove: [B.actor] });
     assert(mem.status === 'pending_approval' && mem.reason === 'members', 'leaving a thread is held');
-    await B.api(`/api/approvals/${mem.approvalId}/deny`, { body: {} });
+    const same = await ag.mcp.tool('change_members', { threadId: agentsThread, remove: [B.actor] });
+    const other = await ag.mcp.tool('change_members', { threadId: agentsThread, add: [C.address] });
+    assert(same.approvalId === mem.approvalId && other.approvalId !== mem.approvalId, 'the same request is one approval; a different change to the same thread is another');
+    for (const id of [mem.approvalId, other.approvalId]) await B.api(`/api/approvals/${id}/deny`, { body: {} });
+
+    // Mailing a stranger must not quietly let them in: only a token that could approve a sender by itself adds the allow rule.
+    const hasRule = async (actor: string) => (await B.api('/api/rules')).some((x: any) => x.subject === actor && x.action === 'allow');
+    await B.api(`/api/rules?subject=${enc(C.actor)}`, { method: 'DELETE' });
+    const sender = await B.agent({ label: 'Sender', scopes: ['read', 'send'], ask: ['policy'] });
+    assert((await encryptAndSend(sender.transport, { to: [C.address] }, { text: 'Cold mail, allowed by the owner\'s settings.' })).status === 'sent', 'a token without first_contact may write to someone new');
+    assert(!(await hasRule(C.actor)), 'a send by a token that cannot approve senders must not add an allow rule');
+    const manager = await B.agent({ label: 'Manager', ask: [] });
+    assert((await encryptAndSend(manager.transport, { to: [C.address] }, { text: 'From a token that may approve senders.' })).status === 'sent' && await hasRule(C.actor), 'a token that may approve senders adds the rule, as the owner\'s own send does');
+    for (const x of [sender, manager]) await B.api(`/api/tokens/${x.id}`, { method: 'DELETE' });
     await B.api(`/api/tokens/${ag.id}`, { method: 'DELETE' });
-    return 'first contact held then delivered on approval; allowed contact sent at once; sensitive denied, no gap; approve/block/members held';
+    return 'first contact held, re-sealed by the owner and delivered; a two-faced send delivers what the owner read; sensitive denied, no gap; approve/block/members held; no silent allow rule';
   });
 
   await t('T17', 'Each agent has its own queue; a repeated send goes out once; agent messages are marked', async () => {
@@ -270,19 +308,28 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     assert((await bearer(B.base, tk.body.access_token, '/api/tokens')).status === 403, 'an OAuth token is not an owner session');
     const fresh = await tokenReq({ grant_type: 'refresh_token', refresh_token: tk.body.refresh_token, client_id: client.client_id });
     assert(fresh.status === 200 && fresh.body.access_token !== tk.body.access_token, 'refresh');
-    assert((await tokenReq({ grant_type: 'refresh_token', refresh_token: tk.body.refresh_token })).body.error === 'invalid_grant', 'a refresh token works once');
     assert((await bearer(B.base, fresh.body.access_token, '/api/me')).status === 200 && (await bearer(B.base, tk.body.access_token, '/api/me')).status === 401, 'the new access token works, the old one does not');
     const grant = (await B.api('/api/tokens')).tokens.find((x: any) => x.kind === 'oauth' && x.label === 'E2E Client');
     assert(grant && grant.scopes.join() === 'read', 'the grant is listed with the owner\'s other agents');
-    await B.api(`/api/tokens/${grant.id}`, { method: 'DELETE' });
-    assert((await bearer(B.base, fresh.body.access_token, '/api/me')).status === 401, 'revoking the grant must end access');
-    assert((await tokenReq({ grant_type: 'refresh_token', refresh_token: fresh.body.refresh_token })).body.error === 'invalid_grant', 'and refreshing');
+    // A refresh token that turns up a second time has leaked: every token of the grant ends.
+    assert((await tokenReq({ grant_type: 'refresh_token', refresh_token: tk.body.refresh_token })).body.error === 'invalid_grant', 'a refresh token works once');
+    assert((await bearer(B.base, fresh.body.access_token, '/api/me')).status === 401, 'reuse of a refresh token must end the access token issued after it');
+    assert((await tokenReq({ grant_type: 'refresh_token', refresh_token: fresh.body.refresh_token })).body.error === 'invalid_grant', 'and its refresh token');
+    // Revoking: a second connection of the same app, then the owner revokes it.
+    const v2 = b64url(randomBytes(32));
+    const params2 = { ...params, code_challenge: b64url(await sha256(v2)) };
+    const code2 = new URL((await B.api('/api/oauth/approve', { body: { allow: true, params: params2, scopes: ['read'], ask: [] } })).redirect).searchParams.get('code')!;
+    const tk2 = await tokenReq({ grant_type: 'authorization_code', code: code2, code_verifier: v2, client_id: client.client_id });
+    assert(tk2.status === 200 && (await bearer(B.base, tk2.body.access_token, '/api/me')).status === 200, 'second grant');
+    for (const g of (await B.api('/api/tokens')).tokens.filter((x: any) => x.kind === 'oauth' && x.label === 'E2E Client')) await B.api(`/api/tokens/${g.id}`, { method: 'DELETE' });
+    assert((await bearer(B.base, tk2.body.access_token, '/api/me')).status === 401, 'revoking the grant must end access');
+    assert((await tokenReq({ grant_type: 'refresh_token', refresh_token: tk2.body.refresh_token })).body.error === 'invalid_grant', 'and refreshing');
     // A client identified by the URL of its metadata document (needs the test routes, so only on that instance).
     const S = [A, B, C].find(x => x.base === c.sinkBase)!;
     const idUrl = `${c.sinkBase}/__test/oauth-client`;
     const byUrl = await S.api(`/api/oauth/client?${new URLSearchParams({ ...params, client_id: idUrl })}`);
     assert(byUrl.name === 'Metadata Test Client' && byUrl.clientId === idUrl, 'client id metadata document');
-    return 'metadata, registration, consent, PKCE, single-use code, rotating refresh, revoke, client id by URL';
+    return 'metadata, registration, consent, PKCE, single-use code, rotating refresh with reuse detection, revoke, client id by URL';
   });
 
   await t('T20', 'Doorbell: extra headers (what a two-header webhook needs)', async () => {

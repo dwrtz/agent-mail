@@ -178,6 +178,13 @@ the results on the Note:
 - Each copy repeats the ciphertext. The whole activity must still fit the
   receiver's 262,144-byte inbox limit; a sender refuses a message that
   would not (413 `too_large` to its own client) rather than drop copies.
+- Nothing proves that the blocks of one Note hold the same plaintext: only
+  a holder of several of the keys could compare them. A sender can
+  therefore show an owner and that owner's agent different text. Clients
+  treat message text as untrusted input either way, and a client that
+  re-sends a message on someone's say-so (an owner approving what an agent
+  wrote) seals the plaintext it actually showed, never a ciphertext it was
+  handed.
 - A 0.2 receiver answers 400 `bad_activity` to an `am:copies` that is not
   an array of at most 4 objects with `keyId` (URL), `enc` (43 characters)
   and `ct` (base64url).

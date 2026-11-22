@@ -1,6 +1,6 @@
 // The owner web app (R14). No framework: small DOM helpers and history routing.
 import settings from '../../spekkr.inputs.json';
-import { KeyFile, AgentFile, newKeyFile, checkKeyFile, encryptAndSend, decryptActivity, decryptAttachment, Transport } from '../shared/client';
+import { KeyFile, AgentFile, newKeyFile, checkKeyFile, encryptAndSend, decryptActivity, decryptAttachment, resealHeld, Transport } from '../shared/client';
 
 const APP = settings.app_name;
 type Me = { handle: string; name: string; email: string; actor: string; address: string; readReceipts: boolean; encKeys: { n: number; keyId: string; publicKey: string }[]; clientKeys: { n: number; keyId: string; label: string | null; tokenId: number | null }[]; doorbell: { url: string; header: string; valueSet: boolean; extra: string[] }; unread: number; unreadMessages: number; requests: number; approvals: number };
@@ -387,20 +387,31 @@ async function approvalsScreen() {
   const { items }: { items: any[] } = await api('/api/approvals');
   const keys = loadKeys();
   const pending = h('div');
-  const decide = (id: number, what: 'approve' | 'deny', btn: HTMLButtonElement, err: HTMLElement) => busy(btn, async () => {
-    const r = await api(`/api/approvals/${id}/${what}`, { body: {} });
+  const decide = (a: any, what: 'approve' | 'deny', btn: HTMLButtonElement, err: HTMLElement) => busy(btn, async () => {
+    let body: unknown = {};
+    if (what === 'approve' && a.kind === 'send') {
+      // What goes out is what was just shown: open the agent's copy and seal that text again for every
+      // recipient here. The agent's own ciphertexts for the recipients are never delivered.
+      const prepared = await api(`/api/approvals/${a.id}/prepare`, { body: {} });
+      const sealed = await resealHeld(keys, a.activity, prepared);
+      body = { payloads: sealed.payloads, selfPayload: sealed.selfPayload };
+    }
+    const r = await api(`/api/approvals/${a.id}/${what}`, { body });
     if (r.status === 'failed') throw new Error(`Could not carry it out: ${r.result?.detail ?? r.result?.error ?? 'unknown error'}`);
     await loadMe(); render();
   }, err);
   for (const a of items.filter(x => x.status === 'pending')) {
     const s = a.subject ?? {};
     let what: Child[] = [];
+    let readable = true;
     if (a.kind === 'send') {
-      let preview: Child[] = [h('p', { class: 'muted' }, '(cannot decrypt with the keys in this browser)')];
+      let preview: Child[] = [h('p', { class: 'muted' }, 'This browser cannot open the message, so it cannot be approved here. You can deny it.')];
+      readable = false;
       try {
         const p = await decryptActivity(keys, a.activity);
         preview = [p.summary ? h('div', { class: 'subject' }, p.summary) : null, h('div', { class: 'text' }, p.content),
           p.attachments.length ? h('p', { class: 'muted small' }, `Attachments: ${p.attachments.map(x => x.name).join(', ')}`) : null];
+        readable = true;
       } catch { /* keep the note */ }
       what = [h('p', {}, `${s.newThread ? 'New message' : 'Reply'} to `, h('strong', {}, (s.to ?? []).map(short).join(', '))), h('div', { class: 'msg preview' }, ...preview)];
     } else if (a.kind === 'approve' || a.kind === 'block') {
@@ -411,8 +422,9 @@ async function approvalsScreen() {
     }
     const err = errBox();
     const yes = h('button', { class: 'primary' }, 'Approve') as HTMLButtonElement, no = h('button', {}, 'Deny') as HTMLButtonElement;
-    yes.addEventListener('click', decide(a.id, 'approve', yes, err));
-    no.addEventListener('click', decide(a.id, 'deny', no, err));
+    yes.disabled = !readable;
+    yes.addEventListener('click', decide(a, 'approve', yes, err));
+    no.addEventListener('click', decide(a, 'deny', no, err));
     pending.append(h('div', { class: 'card approval' }, h('header', {}, h('strong', {}, a.agent), h('span', { class: 'time' }, when(a.createdAt))), ...what,
       h('p', { class: 'muted small' }, REASONS[a.reason] ?? ''), err, h('div', { class: 'row' }, yes, no)));
   }
