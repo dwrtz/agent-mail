@@ -474,7 +474,7 @@ async function consentScreen() {
   const srvKey = h('input', { type: 'checkbox' }) as HTMLInputElement;
   const go = (yes: boolean, btn: HTMLButtonElement) => busy(btn, async () => {
     const serverKey = yes && srvKey.checked;
-    if (serverKey && !confirm(`Let this server read your mail for ${info.name}?\n\nThe server will hold a key for it. Mail sent to you from now on can be decrypted on the server until you revoke ${info.name}.`)) return;
+    if (serverKey && !confirm(`Let this server read your mail for ${info.name}?\n\nThe server will hold a key for it. Mail sent to you from now on can be decrypted on the server until you revoke ${info.name} under Settings, Agents.`)) return;
     const r = await api('/api/oauth/approve', { body: { allow: yes, params, scopes: scopes.values(), ask: asks.values(), serverKey } });
     location.assign(r.redirect);
   }, err);
@@ -482,11 +482,11 @@ async function consentScreen() {
   deny.addEventListener('click', go(false, deny));
   root.replaceChildren(h('div', { class: 'center' }, h('div', { class: 'card auth consent' },
     h('h1', {}, APP), h('p', {}, h('strong', {}, info.name), ' wants to connect to the inbox of ', h('strong', {}, me!.address), '.'),
-    h('p', { class: 'muted small' }, `You will be sent back to ${info.redirectHost}. Messages stay encrypted: this app receives ciphertext unless it also holds one of your keys.`),
+    h('p', { class: 'muted small' }, `You will be sent back to ${info.redirectHost}. ${info.serverKeys ? 'Unless you tick the box under Reading mail, this app only receives encrypted mail.' : 'Messages stay encrypted: this app receives ciphertext unless it also holds one of your keys.'}`),
     scopes.el, asks.el,
     info.serverKeys
       ? h('fieldset', { class: 'checks' }, h('legend', {}, 'Reading mail'),
-          h('label', { class: 'switch warn' }, srvKey, ' Let this server decrypt for it. Only if the app cannot hold a key itself: the server then keeps a key for it and can read your mail, and what people send you, while the app stays connected. Your public profile says that a server-held key is in use.'))
+          h('label', { class: 'switch warn' }, srvKey, ' Let this server decrypt for it. Only if the app cannot hold a key itself: the server then keeps a key for it and can read your mail, and what people send you, until you revoke the app under Settings, Agents. Your public profile says that a server-held key is in use.'))
       : h('p', { class: 'muted small' }, 'This instance does not decrypt on the server, so an app that cannot hold a key will only see encrypted mail.'),
     err, h('div', { class: 'row' }, allow, deny),
     h('p', { class: 'muted small' }, 'You can revoke it at any time under Settings, Agents.'))));

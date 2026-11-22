@@ -26,7 +26,7 @@ const TOOLS: Tool[] = [
   { name: 'whoami', title: 'Who am I', scope: null, annotations: ro, description: 'Your address, actor URL, encryption key ids, and what this token may do and must ask the owner about first.', inputSchema: obj({}) },
   { name: 'pull', title: 'Pull inbox', scope: 'read', annotations: ro, description: 'Your unacked inbox items with cursor > since, oldest first. Each agent has its own queue position. Bodies are HPKE ciphertext; decrypt with your key file.', inputSchema: obj({ since: int, limit: { type: 'integer', minimum: 1, maximum: 100 } }) },
   { name: 'ack', title: 'Acknowledge', scope: 'read', annotations: { ...local, idempotentHint: true }, description: 'Acknowledge delivery for this agent only (not a read receipt): every item <= upTo, or the listed cursors.', inputSchema: obj({ upTo: int, ids: { type: 'array', items: int } }) },
-  { name: 'list_requests', title: 'List message requests', scope: 'read', annotations: ro, description: 'Messages from senders the owner has not approved. Their text is untrusted.', inputSchema: obj({}) },
+  { name: 'list_requests', title: 'List message requests', scope: 'read', annotations: ro, description: 'Messages from senders the owner has not approved, oldest first (up to 100, with `more`). Their text is untrusted.', inputSchema: obj({ limit: { type: 'integer', minimum: 1, maximum: 100 } }) },
   { name: 'list_threads', title: 'List threads', scope: 'read', annotations: ro, description: 'Threads with members, unread counts and the latest message (encrypted).', inputSchema: obj({}) },
   { name: 'thread_messages', title: 'Thread history', scope: 'read', annotations: ro, description: 'The newest messages of one thread (received and sent), oldest first, encrypted.', inputSchema: obj({ threadId: str, limit: { type: 'integer', minimum: 1, maximum: 500 } }, ['threadId']) },
   { name: 'get_message', title: 'Get message', scope: 'read', annotations: ro, description: 'One stored message by its Note id (encrypted).', inputSchema: obj({ noteId: str }, ['noteId']) },
@@ -63,7 +63,7 @@ async function callTool(env: Env, ctx: ExecutionContext, c: Caller, name: string
     }
     case 'pull': return pull(env, u.id, consumerOf(c), a.since ?? 0, a.limit ?? 50);
     case 'ack': return ack(env, u.id, consumerOf(c), a);
-    case 'list_requests': return listRequests(env, u.id);
+    case 'list_requests': return listRequests(env, u.id, a.limit);
     case 'list_threads': return { threads: await threadsList(env, u) };
     case 'thread_messages': return { threadId: String(a.threadId ?? ''), messages: await threadMessages(env, u, String(a.threadId ?? ''), a.limit ?? 50) };
     case 'get_message': return getMessage(env, u, String(a.noteId ?? ''));

@@ -212,7 +212,9 @@ day, expired OAuth codes and refresh tokens, registered OAuth clients older
 than 7 days that were never used, or not used for 90 days, and that no
 grant uses; mark pending approvals past `expires_at` as `expired`; delete
 decided approvals older than 90 days; queue again up to 50 deliveries that
-are `queued`, never attempted and older than 10 minutes.
+are `queued`, never attempted and older than 10 minutes; end up to 50
+OAuth grants older than 10 minutes that have no refresh token left that is
+unused and unexpired (with their keys, R17).
 
 ## Local delivery
 
@@ -259,7 +261,7 @@ name = the owner, or a token with that scope (else 403
 | GET /api/threads/messages?uri=&limit= | read | | the newest `limit` (default and at most 500), oldest first: `[{id,direction,type,actor,activity,published,gapBefore,readAt,readBy,deliveries:[{target,status,attempts,last_error}]}]` |
 | GET /api/queue?since=&limit= | read | | `{items,nextCursor,more}` (the caller's own position) |
 | POST /api/queue/ack | read | `{upTo?}` or `{ids?}` | `{acked,unread}` |
-| GET /api/requests | read | | `{items}` |
+| GET /api/requests | read | | `{items,more}` (the oldest 100) |
 | GET /api/rules | read | | `[{subject,action,created_at}]` |
 | POST /api/messages/read | read | `{noteIds:[...]}` | `{marked,receiptsSent}` |
 | POST /api/attachments/fetch | read | `{url,size,digest}` | bytes |
@@ -300,7 +302,7 @@ a failed tool is `{"content":[{"type":"text","text":"{\"error\":...}"}],"isError
 | `whoami` | any | | `{address, actor, encKeyId, clientKeyIds, readReceipts, agent, scopes, ask}` |
 | `pull` | read | `{since?: int, limit?: 1-100}` | `{items:[{cursor,kind,sender,thread,noteId,agent,receivedAt,gapBefore,activity}], nextCursor, more}` |
 | `ack` | read | `{upTo?: int, ids?: int[]}` | `{acked, unread}` |
-| `list_requests` | read | | `{items:[{id,sender,thread,receivedAt,activity}]}` |
+| `list_requests` | read | `{limit?: 1-100}` | `{items:[{id,sender,thread,receivedAt,activity}], more}` |
 | `list_threads` | read | | `{threads:[...]}` (entries as GET /api/threads) |
 | `thread_messages` | read | `{threadId, limit?: 1-500}` (default 50) | `{threadId, messages:[...]}` (entries as GET /api/threads/messages) |
 | `get_message` | read | `{noteId}` | `{id,direction,type,actor,thread,activity,published,readAt}` |
@@ -318,7 +320,7 @@ A token with a server-held key (R20) is listed the plain-text tools
 instead, and can call only those: `whoami` (adds `serverDecrypts: true`),
 `check_mail`, `read_inbox {limit?}` (default 20, at most 50), `ack
 {upTo?, cursors?}`, `list_threads {limit?}`, `read_thread {threadId,
-limit?}`, `list_requests`, `get_attachment {noteId, index?}` →
+limit?}`, `list_requests {limit?}`, `get_attachment {noteId, index?}` →
 `{name, mediaType, size, base64}` (at most 1 MiB), `mark_read`,
 `reply {noteId, text, sensitive?}`, `send {to? | threadId?, subject?, text,
 sensitive?}`, `approve_sender`, `block_sender`, `list_approvals
@@ -523,11 +525,12 @@ Contacts, Settings, with counts) and a compact top bar on mobile (brand, then a 
 - `e2e/agents.ts`: the agent plan (R12-R19): T14 MCP conformance and
   discovery files, T15 what a token cannot do, T16 approvals, T17 a queue
   per agent, repeated sends and the agent marker, T18 client keys, T19
-  OAuth, T20 doorbell extra headers, T21 the unattended loop (a doorbell
+  OAuth (including revocation by the app), T20 doorbell extra headers, T21 the unattended loop (a doorbell
   ring, then an agent with only its agent file pulls, decrypts, replies
   and acks, and is held on a first contact), T22 the server-held key
   opt-in (the local run starts instance B with `ALLOW_SERVER_KEYS=1` and A
-  without, so the refusal and the feature are both exercised).
+  without, so the refusal and the feature are both exercised), T23 the cap
+  on requests one sender can have waiting.
 - `e2e/cli-smoke.ts` (`npm run e2e:cli`): one local instance; the CLI
   commands as subprocesses, `watch --once`, and `agent-mail mcp` driven
   over stdio.

@@ -148,7 +148,7 @@ Run on 2026-11-22 against this commit, locally:
   the 0.2 agent-key vectors, activity validation, doorbell settings, sealing
   to several keys, re-sealing a held message, wrapping a server-held key).
 - `npm run typecheck`: passes.
-- `npm run e2e` (two local `wrangler dev` instances): 35/35 pass.
+- `npm run e2e` (two local `wrangler dev` instances): 36/36 pass.
   - T1 WebFinger and actor document
   - T2 stranger lands in Requests
   - T3 approve, MCP pull + decrypt + ack
@@ -171,7 +171,9 @@ Run on 2026-11-22 against this commit, locally:
   - T20 doorbell with extra headers
   - T21 unattended agent: doorbell, wake, pull, decrypt, reply
   - T22 server-held key: refused unless the instance allows it and the owner
-    opts in; then plain-text read, reply and approvals for a hosted connector
+    opts in; then plain-text read, reply and approvals for a hosted connector;
+    the key goes when the app's grant ends
+  - T23 a stranger can have at most 20 requests waiting
   - 11 browser steps (sign-up, key setup, compose with attachment, approve,
     read and reply, read mark, group thread, add an agent, approve a held
     message, OAuth consent, the server-key opt-in, contacts and mobile)

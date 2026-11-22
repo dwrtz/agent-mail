@@ -84,9 +84,14 @@ export async function ack(env: Env, userId: number, consumer: string, body: { up
   return { acked, unread: (await counts(env, userId, consumer)).unread };
 }
 
-export async function listRequests(env: Env, userId: number) {
-  const rows = (await env.DB.prepare("SELECT id, actor, thread, activity, received_at FROM messages WHERE user_id = ? AND direction = 'in' AND state = 'request' ORDER BY id").bind(userId).all<any>()).results;
-  return { items: rows.map(r => ({ id: r.id, sender: r.actor, thread: r.thread, receivedAt: r.received_at, activity: JSON.parse(r.activity) })) };
+/** How many requests one sender can have waiting. More are accepted and dropped, as for a blocked sender. */
+export const MAX_REQUESTS_PER_SENDER = 20;
+
+/** The oldest pending requests, at most `limit` (1-100), with `more` when there are more. */
+export async function listRequests(env: Env, userId: number, limit = 100) {
+  limit = Math.max(1, Math.min(100, Math.floor(limit) || 100));
+  const rows = (await env.DB.prepare("SELECT id, actor, thread, activity, received_at FROM messages WHERE user_id = ? AND direction = 'in' AND state = 'request' ORDER BY id LIMIT ?").bind(userId, limit + 1).all<any>()).results;
+  return { items: rows.slice(0, limit).map(r => ({ id: r.id, sender: r.actor, thread: r.thread, receivedAt: r.received_at, activity: JSON.parse(r.activity) })), more: rows.length > limit };
 }
 
 export async function setRule(env: Env, userId: number, subject: string, action: 'allow' | 'block') {

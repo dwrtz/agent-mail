@@ -5,7 +5,7 @@ import { webfingerJrd, validateActivity, isUrl, ProtoError, MAX_INBOX_BODY, thre
 import { verifyRequest, SigError, POST_COMPONENTS, GET_COMPONENTS, signRequest } from '../shared/httpsig';
 import { digestMatches, contentDigest } from '../shared/digest';
 import { multikeyDecode, te } from '../shared/enc';
-import { onQueued, decide } from './inboxq';
+import { onQueued, decide, MAX_REQUESTS_PER_SENDER } from './inboxq';
 
 type Handler = (req: Request, env: Env, ctx: ExecutionContext) => Promise<Response>;
 let selfHandler: Handler | null = null;
@@ -233,6 +233,11 @@ async function receive(env: Env, ctx: ExecutionContext, user: UserRow, act: Inbo
   // Decide
   const action = await decide(env, user.id, act.actor);
   if (action === 'block') return 'accepted';
+  if (action === 'request') {
+    // A stranger gets a few messages held, not an unlimited store on someone else's instance.
+    const waiting = (await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE user_id = ? AND direction = 'in' AND state = 'request' AND actor = ?").bind(user.id, act.actor).first<{ n: number }>())?.n ?? 0;
+    if (waiting >= MAX_REQUESTS_PER_SENDER) return 'accepted';
+  }
   // Thread state
   if (!thread) {
     const members = act.type === 'Create' ? [...new Set([act.actor, ...act.to])] : [...new Set(act.members)];

@@ -323,6 +323,15 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     assert(tk2.status === 200 && (await bearer(B.base, tk2.body.access_token, '/api/me')).status === 200, 'second grant');
     for (const g of (await B.api('/api/tokens')).tokens.filter((x: any) => x.kind === 'oauth' && x.label === 'E2E Client')) await B.api(`/api/tokens/${g.id}`, { method: 'DELETE' });
     assert((await bearer(B.base, tk2.body.access_token, '/api/me')).status === 401, 'revoking the grant must end access');
+    // The app can also say it is gone (RFC 7009): that ends the grant on this side too.
+    const v3 = b64url(randomBytes(32));
+    const params3 = { ...params, code_challenge: b64url(await sha256(v3)) };
+    const code3 = new URL((await B.api('/api/oauth/approve', { body: { allow: true, params: params3, scopes: ['read'], ask: [] } })).redirect).searchParams.get('code')!;
+    const tk3 = await tokenReq({ grant_type: 'authorization_code', code: code3, code_verifier: v3, client_id: client.client_id });
+    assert(as.revocation_endpoint === `${B.base}/oauth/revoke`, 'the metadata names the revocation endpoint');
+    const rv = await fetch(as.revocation_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: tk3.body.refresh_token }) });
+    assert(rv.status === 200 && (await bearer(B.base, tk3.body.access_token, '/api/me')).status === 401 && !(await B.api('/api/tokens')).tokens.some((x: any) => x.label === 'E2E Client'), 'revocation by the app ends the grant');
+    assert((await fetch(as.revocation_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: 'nonsense' }) })).status === 200, 'an unknown token is answered 200 as well');
     assert((await tokenReq({ grant_type: 'refresh_token', refresh_token: tk2.body.refresh_token })).body.error === 'invalid_grant', 'and refreshing');
     // A client identified by the URL of its metadata document (needs the test routes, so only on that instance).
     const S = [A, B, C].find(x => x.base === c.sinkBase)!;
@@ -457,6 +466,10 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     assert((await approveSend(S, item)).status === 'approved', 'approve');
     const atStranger = await waitFor('approved message', async () => (await inQueue(stranger, cold.noteId)) || (await stranger.api('/api/requests')).items.find((x: any) => x.activity.object?.id === cold.noteId));
     assert((await decryptActivity(stranger.keys, atStranger.activity)).content === 'Hello from a hosted connector.', 'the stranger gets it');
+    for (const [args, why] of [[{ to: [peer.address], threadId: msg.thread, text: 'x' }, 'not both'], [{ to: [peer.address], text: 'x'.repeat(65537) }, 'too_large'], [{ to: [peer.address], text: ' ' }, 'text is required']] as const) {
+      const bad = await mcp.rpc('tools/call', { name: 'send', arguments: args });
+      assert(bad.isError && bad.content[0].text.includes(why), `send must refuse (${why}): ${bad.content?.[0]?.text}`);
+    }
     const flagged = await mcp.tool('reply', { noteId: q.noteId, text: 'I agree to the price.', sensitive: true });
     assert(flagged.status === 'pending_approval' && flagged.reason === 'agent_flagged', 'sensitive is held here too');
     await S.api(`/api/approvals/${flagged.approvalId}/deny`, { body: {} });
@@ -471,11 +484,19 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
       const code = new URL((await S.api('/api/oauth/approve', { body: { allow: true, params, ask: [], ...(serverKey ? { serverKey: true } : {}) } })).redirect).searchParams.get('code')!;
       const tok: any = await (await fetch(`${S.base}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: reg.client_id }) })).json();
       const m = new McpClient(`${S.base}/mcp`, tok.access_token); await m.init();
-      return (await m.rpc('tools/list')).tools.map((x: any) => x.name) as string[];
+      return { tok, tools: (await m.rpc('tools/list')).tools.map((x: any) => x.name) as string[] };
     };
     const without = await exchange(false), withKey = await exchange(true);
-    assert(without.includes('pull') && !without.includes('read_inbox'), 'consent without the box: ciphertext tools');
-    assert(withKey.includes('read_inbox') && !withKey.includes('pull'), 'consent with the box: plain-text tools');
+    assert(without.tools.includes('pull') && !without.tools.includes('read_inbox'), 'consent without the box: ciphertext tools');
+    assert(withKey.tools.includes('read_inbox') && !withKey.tools.includes('pull'), 'consent with the box: plain-text tools');
+    // When such an app is gone for good, its key must not stay behind with mail still being sealed to it.
+    const appKey = (await S.api('/api/tokens')).tokens.find((x: any) => x.label === 'Hosted App' && x.serverKey).keyId;
+    const serverKeys = async () => ((await (await fetch(S.actor)).json()) as any)['am:serverKeys'] ?? [];
+    assert((await serverKeys()).includes(appKey), 'the app\'s server-held key is published');
+    const form = (p: Record<string, string>) => fetch(`${S.base}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(p) });
+    assert((await form({ grant_type: 'refresh_token', refresh_token: withKey.tok.refresh_token })).status === 200, 'refresh');
+    assert((await form({ grant_type: 'refresh_token', refresh_token: withKey.tok.refresh_token })).status === 400, 'a refresh token used twice');
+    assert(!(await serverKeys()).includes(appKey) && !(await S.api('/api/tokens')).tokens.some((x: any) => x.label === 'Hosted App' && x.serverKey), 'a grant that ended (its refresh token was reused) must take its server-held key with it');
     if (off) {
       const offReg: any = await (await fetch(`${off.base}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Hosted App', redirect_uris: ['http://localhost:9/callback'] }) })).json();
       const p = { response_type: 'code', client_id: offReg.client_id, redirect_uri: 'http://localhost:9/callback', code_challenge: b64url(await sha256('x'.repeat(43))), code_challenge_method: 'S256' };
@@ -490,6 +511,25 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     assert((await bearer(S.base, tk.token, '/api/me')).status === 401, 'and end the connection');
     for (const acct of [A, B, C]) { const z = await acct.api('/api/queue?limit=100'); if (z.items.length) await acct.api('/api/queue/ack', { body: { upTo: z.items.at(-1).cursor } }); }
     return `${off ? 'refused where the instance forbids it; ' : ''}opted in: plain-text read, attachment, reply, same approvals; OAuth box; gone on revoke`;
+  });
+
+  await t('T23', 'A stranger cannot pile up requests', async () => {
+    const S = [A, B, C].find(x => x.base === c.sinkBase)!; // the probe actor lives on this instance
+    await S.api(`/api/rules?subject=${enc(probe.actor)}`, { method: 'DELETE' });
+    const note = () => ({ '@context': ACTIVITY_CONTEXT, id: `${probe.actor}/activities/${crypto.randomUUID()}`, type: 'Create', actor: probe.actor, published: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), to: [S.actor],
+      object: { id: `${probe.actor}/notes/${crypto.randomUUID()}`, type: 'Note', attributedTo: probe.actor, to: [S.actor], published: new Date().toISOString(), context: `${probe.actor}/threads/${crypto.randomUUID()}`, inReplyTo: null,
+        content: 'This message is end-to-end encrypted.', 'am:seq': 1, 'am:encrypted': { kem: 32, kdf: 1, aead: 1, recipient: S.actor, keyId: `${S.actor}#enc-1`, enc: 'A'.repeat(43), ct: 'B'.repeat(40) } } });
+    const mine = async () => (await S.api('/api/requests')).items.filter((x: any) => x.sender === probe.actor).length;
+    const before = await mine();
+    let accepted = 0;
+    for (let i = 0; i < 24 - before; i++) if ((await send(await probe.request(`${S.actor}/inbox`, note()))).status === 202) accepted++;
+    const held = await mine();
+    assert(accepted === 24 - before && held === 20, `every POST is answered 202 (${accepted}), but only 20 are held (${held})`);
+    const list = await S.api('/api/requests');
+    assert(list.more === false && Array.isArray(list.items), 'the list says whether there are more');
+    const dropped = await S.api('/api/requests/block', { body: { actor: probe.actor } });
+    await S.api(`/api/rules?subject=${enc(probe.actor)}`, { method: 'DELETE' });
+    return `24 sent, all answered 202, 20 held; ${dropped.dropped} dropped again`;
   });
 
   return results;

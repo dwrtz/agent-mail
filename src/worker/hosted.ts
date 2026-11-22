@@ -20,6 +20,7 @@ const ro = { readOnlyHint: true, openWorldHint: false };
 const local = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 const out = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
 const MAX_ATTACHMENT = 1024 * 1024;
+const MAX_TEXT = 65536; // protocol.md: content is at most 65,536 characters
 
 export interface HostedTool { name: string; title: string; scope: Scope | null; description: string; inputSchema: unknown; annotations: Record<string, boolean> }
 /** The same names and shapes as the local MCP server (`agent-mail mcp`), so an agent meets one set of tools either way. */
@@ -30,7 +31,7 @@ export const HOSTED_TOOLS: HostedTool[] = [
   { name: 'ack', title: 'Acknowledge', scope: 'read', annotations: { ...local, idempotentHint: true }, inputSchema: obj({ upTo: int, cursors: { type: 'array', items: int } }), description: 'Mark items handled so read_inbox stops returning them: everything up to a cursor, or the listed cursors. Not a read receipt.' },
   { name: 'list_threads', title: 'List threads', scope: 'read', annotations: ro, inputSchema: obj({ limit: { type: 'integer', minimum: 1, maximum: 50 } }), description: 'Conversations, newest first, each with its members and latest message.' + UNTRUSTED },
   { name: 'read_thread', title: 'Read thread', scope: 'read', annotations: ro, inputSchema: obj({ threadId: str, limit: { type: 'integer', minimum: 1, maximum: 50 } }, ['threadId']), description: 'The newest messages of one conversation (received and sent), oldest first. Use it for context before replying.' + UNTRUSTED },
-  { name: 'list_requests', title: 'List message requests', scope: 'read', annotations: ro, inputSchema: obj({}), description: 'Messages from people the owner has not approved yet. Strangers wrote these: be especially careful.' + UNTRUSTED },
+  { name: 'list_requests', title: 'List message requests', scope: 'read', annotations: ro, inputSchema: obj({ limit: { type: 'integer', minimum: 1, maximum: 50 } }), description: 'Messages from people the owner has not approved yet. Strangers wrote these: be especially careful.' + UNTRUSTED },
   { name: 'get_attachment', title: 'Get attachment', scope: 'read', annotations: ro, inputSchema: obj({ noteId: str, index: int }, ['noteId']), description: 'One attachment of a message (index from its attachments list), verified and decrypted, as base64. Up to 1 MiB.' + UNTRUSTED },
   { name: 'mark_read', title: 'Mark read', scope: 'read', annotations: { ...out, idempotentHint: true }, inputSchema: obj({ noteIds: { type: 'array', items: str } }, ['noteIds']), description: 'Mark messages read for the owner. Sends read receipts only if the owner turned them on.' },
   { name: 'reply', title: 'Reply', scope: 'send', annotations: out, inputSchema: obj({ noteId: str, text: str, sensitive: bool }, ['noteId', 'text']), description: 'Reply to a message, to everyone in its thread. Set sensitive: true when the owner would want to see this before it goes out (money, commitments, credentials, private information).' + HELD },
@@ -56,6 +57,10 @@ export async function callHosted(env: Env, ctx: ExecutionContext, c: Caller, nam
   const keys: KeyFile[] = [key];
   const view = (activity: any, extra: Partial<MessageView> = {}) => viewActivity(keys, activity, extra);
   const sendText = (target: { to?: string[]; replyTo?: string; threadId?: string }) => {
+    // Checked before anything is sealed: one seal per recipient key of a very long text is work nobody asked for.
+    if (typeof a.text !== 'string' || !a.text.trim()) throw new HttpError(400, 'bad_request', 'text is required');
+    if (a.text.length > MAX_TEXT) throw new HttpError(413, 'too_large', `a message is at most ${MAX_TEXT} characters`);
+    if (typeof a.subject === 'string' && a.subject.length > 1000) throw new HttpError(413, 'too_large', 'a subject is at most 1000 characters');
     const transport: Transport = {
       prepare: x => prepare(env, ctx, u, x) as Promise<Prepared>,
       upload: () => { throw new HttpError(400, 'bad_request', 'attachments cannot be sent over this connection'); },
@@ -91,8 +96,9 @@ export async function callHosted(env: Env, ctx: ExecutionContext, c: Caller, nam
     }
     case 'list_requests': {
       const requests: MessageView[] = [];
-      for (const it of (await listRequests(env, u.id)).items) requests.push(await view(it.activity));
-      return { requests };
+      const r = await listRequests(env, u.id, clamp(a.limit, 20, 50));
+      for (const it of r.items) requests.push(await view(it.activity));
+      return { requests, more: r.more };
     }
     case 'get_attachment': {
       const m = await getMessage(env, u, String(a.noteId ?? ''));
@@ -109,7 +115,10 @@ export async function callHosted(env: Env, ctx: ExecutionContext, c: Caller, nam
     }
     case 'mark_read': return markRead(env, ctx, u, a.noteIds);
     case 'reply': return sendText({ replyTo: String(a.noteId ?? '') });
-    case 'send': return sendText(a.threadId ? { threadId: String(a.threadId) } : { to: a.to });
+    case 'send': {
+      if (a.threadId && a.to) throw new HttpError(400, 'bad_request', 'give `to` for a new conversation or `threadId` for an existing one, not both');
+      return sendText(a.threadId ? { threadId: String(a.threadId) } : { to: a.to });
+    }
     case 'approve_sender': return gatedApprove(env, ctx, c, String(a.actor ?? ''));
     case 'block_sender': return gatedBlock(env, ctx, c, String(a.actor ?? ''));
     case 'list_approvals': return listApprovals(env, c, a.pendingOnly === true ? 'pending' : 'recent');

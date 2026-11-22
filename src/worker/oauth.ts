@@ -37,11 +37,45 @@ export async function oauthRoute(req: Request, env: Env, ctx: ExecutionContext, 
       response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none'], scopes_supported: SCOPES,
       client_id_metadata_document_supported: true, authorization_response_iss_parameter_supported: true,
+      revocation_endpoint: `${o}/oauth/revoke`, revocation_endpoint_auth_methods_supported: ['none'],
     }, 200, CORS);
   }
   if (path === '/oauth/register' && req.method === 'POST') return register(req, env);
   if (path === '/oauth/token' && req.method === 'POST') return token(req, env);
+  if (path === '/oauth/revoke' && req.method === 'POST') return revoke(req, env);
   return null;
+}
+
+/** Ends a grant and everything that hangs off it, a server-held key included. */
+async function endGrant(env: Env, tokenId: number) {
+  const g = await env.DB.prepare("SELECT user_id FROM api_tokens WHERE id = ? AND kind = 'oauth'").bind(tokenId).first<{ user_id: number }>();
+  if (g) await revokeToken(env, g.user_id, tokenId);
+}
+
+/** RFC 7009: an app that is disconnected says so with one of its tokens. Always 200, whatever the token was. */
+async function revoke(req: Request, env: Env): Promise<Response> {
+  const text = await req.text();
+  const p: Record<string, string> = text.length > 16384 ? {} : (req.headers.get('content-type') ?? '').includes('application/json')
+    ? Object.fromEntries(Object.entries(parseJson<Record<string, unknown>>(text, {})).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+    : Object.fromEntries(new URLSearchParams(text));
+  if (p.token) {
+    const h = hex(await sha256(p.token));
+    const r = await env.DB.prepare('SELECT token_id FROM oauth_tokens WHERE access_hash = ?1 OR refresh_hash = ?1').bind(h).first<{ token_id: number }>();
+    if (r) await endGrant(env, r.token_id);
+  }
+  return json({}, 200, { ...CORS, 'cache-control': 'no-store' });
+}
+
+/**
+ * Grants that no longer have a usable token (the app went away, or its tokens expired) are ended by the
+ * cron: a connector that cannot come back must not go on having mail sealed to a key the instance holds.
+ */
+export async function endDeadGrants(env: Env) {
+  const now = nowIso();
+  const rows = (await env.DB.prepare(`SELECT t.id FROM api_tokens t WHERE t.kind = 'oauth' AND t.created_at < ?
+      AND NOT EXISTS (SELECT 1 FROM oauth_tokens o WHERE o.token_id = t.id AND o.rotated_at IS NULL AND o.refresh_expires_at > ?) LIMIT 50`)
+    .bind(new Date(Date.now() - 10 * 60_000).toISOString(), now).all<{ id: number }>()).results;
+  for (const r of rows) await endGrant(env, r.id);
 }
 
 // ---- clients ----
@@ -192,8 +226,10 @@ async function token(req: Request, env: Env): Promise<Response> {
       try { await createServerKey(env, owner!, t.id, c.client_name); }
       catch (e) { await revokeToken(env, c.user_id, t.id); return oauthError('access_denied', e instanceof HttpError ? e.message : 'could not set up the connection'); }
     }
-    await touchClient(env, c.client_id);
-    return issue(env, t.id, c.client_id);
+    try {
+      await touchClient(env, c.client_id);
+      return await issue(env, t.id, c.client_id);
+    } catch (e) { await revokeToken(env, c.user_id, t.id); throw e; } // no grant, and no key, without tokens to use it
   }
   if (p.grant_type === 'refresh_token') {
     if (!p.refresh_token) return oauthError('invalid_request', 'refresh_token is required');
@@ -205,7 +241,7 @@ async function token(req: Request, env: Env): Promise<Response> {
     // that means the token leaked, so every token of the grant ends and the app has to be connected again.
     const used = r.rotated_at ? null : await env.DB.prepare('UPDATE oauth_tokens SET rotated_at = ?, access_expires_at = ? WHERE refresh_hash = ? AND rotated_at IS NULL').bind(nowIso(), nowIso(), hash).run();
     if (!used?.meta.changes) {
-      await env.DB.prepare('DELETE FROM oauth_tokens WHERE token_id = ? AND rotated_at IS NULL').bind(r.token_id).run();
+      await endGrant(env, r.token_id); // the whole grant: its tokens, its queue position, and a server-held key if it had one
       return oauthError('invalid_grant', 'the refresh token was already used; connect the app again');
     }
     await touchClient(env, r.client_id);

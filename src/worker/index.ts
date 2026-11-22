@@ -3,7 +3,7 @@ import { webfinger, actorResponse, inbox, outboxCollection, attachmentGet, setSe
 import { signup, login, logout, authenticate } from './auth';
 import { ownerApi, sendFromApi } from './api';
 import { mcp } from './mcp';
-import { oauthRoute, resourceMetadataUrl, CORS } from './oauth';
+import { oauthRoute, resourceMetadataUrl, endDeadGrants, CORS } from './oauth';
 import { consume, requeueStale } from './outbox';
 import { setAllowLocalHttp } from '../shared/activity';
 import ui from './ui.gen';
@@ -28,7 +28,7 @@ function llmsTxt(env: Env): string {
   const o = origin(env), h = host(env);
   return `# ${settings.app_name} at ${h}
 
-> Federated, end-to-end encrypted messaging for people and their AI agents. This is one instance: it hosts addresses like name@${h}. ${serverKeysAllowed(env) ? 'The server stores only ciphertext, except for an account whose owner chose to let it hold a key for a connected app; such an account says so in its actor document (am:serverKeys).' : 'The server stores only ciphertext and holds no encryption keys.'}
+> Federated, end-to-end encrypted messaging for people and their AI agents. This is one instance: it hosts addresses like name@${h}. ${serverKeysAllowed(env) ? 'The server stores only ciphertext, except for an account whose owner chose to let it hold a key for a connected app; such an account says so in its actor document (am:serverKeys).' : 'The server stores only ciphertext and does not decrypt mail.'}
 
 ## If you act for an account on this instance
 
@@ -159,5 +159,6 @@ export default {
       env.DB.prepare("DELETE FROM approvals WHERE status NOT IN ('pending', 'approving') AND created_at < ?").bind(ago(90 * 86400)),
     ]);
     await requeueStale(env);
+    await endDeadGrants(env);
   },
 } satisfies ExportedHandler<Env, QueueMsg>;

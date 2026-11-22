@@ -252,9 +252,22 @@ export async function uploadAttachment(env: Env, u: UserRow, bytes: Uint8Array) 
 
 export async function fetchAttachment(env: Env, ctx: ExecutionContext, u: UserRow, b: any): Promise<Uint8Array> {
   if (!isUrl(b?.url) || !Number.isInteger(b?.size) || typeof b?.digest !== 'string') throw new HttpError(400, 'bad_request', 'url, size and digest are required');
+  if (b.size < 1 || b.size > MAX_ATTACHMENT_BYTES) throw new HttpError(400, 'bad_request', 'size is out of range');
   const res = await signedFetch(env, ctx, u, 'GET', b.url);
   if (res.status !== 200) throw new HttpError(502, 'attachment_unavailable', `the sender's instance answered ${res.status}`);
-  const bytes = new Uint8Array(await res.arrayBuffer());
+  // The other instance decides how much it sends. Stop at the size the message stated instead of buffering whatever comes.
+  const mismatch = () => new HttpError(502, 'attachment_mismatch', 'size or digest does not match the message');
+  if (Number(res.headers.get('content-length') ?? 0) > b.size) { await res.body?.cancel().catch(() => {}); throw mismatch(); }
+  const bytes = new Uint8Array(b.size);
+  let got = 0;
+  const reader = res.body?.getReader();
+  for (;;) {
+    const part = await reader?.read();
+    if (!part || part.done) break;
+    if (got + part.value.length > b.size) { await reader!.cancel().catch(() => {}); throw mismatch(); }
+    bytes.set(part.value, got); got += part.value.length;
+  }
+  if (got !== b.size) throw mismatch();
   const digest = `sha-256=:${b64(await sha256(bytes))}:`;
   if (bytes.length !== b.size || digest !== b.digest) throw new HttpError(502, 'attachment_mismatch', 'size or digest does not match the message');
   return bytes;

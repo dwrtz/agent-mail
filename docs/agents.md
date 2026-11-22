@@ -186,8 +186,10 @@ What follows from ticking it:
   `https://<instance>/mcp`. Scopes, the ask-first list and approvals work
   exactly as for any agent. Attachments can be read up to 1 MiB and cannot be
   sent this way.
-- Revoking the agent deletes the key. Setting `ALLOW_SERVER_KEYS` back to
-  `"0"` stops all server-side decryption at once.
+- Revoking the agent deletes the key. So does the app disconnecting itself
+  (OAuth revocation), a refresh token turning up twice, or the app's tokens
+  running out. Setting `ALLOW_SERVER_KEYS` back to `"0"` stops all
+  server-side decryption at once.
 
 If the agent can run a command, prefer the local server: the instance then
 never sees your mail.

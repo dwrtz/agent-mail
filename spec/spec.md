@@ -260,6 +260,9 @@ exactly that check and gets the listed status and code.
   (`domain:example.com`), with action `allow` or `block`. An actor rule wins
   over a domain rule.
 - With no rule the message is a **request**: it is stored but not queued.
+  One sender can have at most 20 requests waiting; more are answered 202
+  and dropped, as for a blocked sender. Requests are listed oldest first,
+  at most 100 at a time, with `more` when there are more.
 - `allow`: stored and appended to the user's inbox queue (R8).
 - `block`: dropped (nothing stored), still 202.
 - **Approve** a sender: add an `allow` rule and move all their pending
@@ -342,6 +345,8 @@ is refused with 403 `not_member`.
   (`POST /api/attachments/fetch`), which makes the signed GET as the user,
   checks size and digest against the Note's attachment entry (502
   `attachment_mismatch` if not), and returns the bytes. The client decrypts.
+  The instance never reads more than the size the Note states: a larger
+  `Content-Length`, or a body that runs past it, is a mismatch.
 
 Check: round-trip a file from instance A to B; the bytes B's client decrypts
 equal the original; a flipped byte in R2 gives `attachment_mismatch`; an
@@ -595,6 +600,14 @@ read; a send by a token that cannot approve senders adds no allow rule.
   (`invalid_grant`, `invalid_request`, `unsupported_grant_type`).
 - A registered client is kept while a grant uses it, and for 90 days after
   it was last used (7 days if it never was).
+- **Ending a grant.** `POST /oauth/revoke` (RFC 7009, advertised as
+  `revocation_endpoint`) with any of a grant's tokens ends the grant; it
+  always answers 200. A grant also ends when one of its refresh tokens is
+  used twice, when the owner revokes it, and, by the cron, when it has had
+  no usable token for 10 minutes (the app is gone or its tokens expired).
+  Ending a grant removes all of it: tokens, queue position, pending
+  approvals and its key (R18, R20). A code exchange that cannot issue
+  tokens leaves no grant behind.
 - A grant is a connector token (R16) of kind `oauth`, labelled with the
   client's name: same scopes, same ask list, its own queue position,
   listed and revoked with the other agents. An access token is never an
@@ -606,7 +619,8 @@ refused); a consent that is refused for a foreign redirect URI or without
 S256; a code that works once and only with the right verifier; an access
 token that reaches `/mcp` with only the allowed tools; a refresh token
 that works once, and whose second use ends the tokens issued after it;
-revoking the grant ends access and refreshing.
+revoking the grant, by the owner or by the app at the revocation endpoint,
+ends access and refreshing.
 
 ### R18. Agent keys and the agent marker
 
@@ -717,9 +731,17 @@ message text. So it is never a default, and it is said openly.
   connector's own queue position and the agent marker all apply as for any
   agent. Plain text is never logged or stored.
 - **Taking it back.** Revoking the agent, or removing its key, deletes the
-  wrapped key and the entry in `am:serverKeys`. Turning the instance switch
-  off stops all server-side decryption at once: such tokens fall back to
-  the ciphertext tools.
+  wrapped key and the entry in `am:serverKeys`. So does the end of an OAuth
+  grant by any route (R17): an app that is gone must not go on having mail
+  sealed to a key the instance holds. Turning the instance switch off stops
+  all server-side decryption at once: such tokens fall back to the
+  ciphertext tools. The consent text says the server can read mail "until
+  you revoke the app", which is what holds.
+- **Bounds.** These tools do bounded work whatever a correspondent sends:
+  `read_inbox`, `read_thread`, `list_threads` and `list_requests` return at
+  most 50 items (20 by default); a message to send is at most 65,536
+  characters and a subject 1,000, checked before anything is sealed; `send`
+  takes `to` or `threadId`, not both.
 
 Check: with the instance switch off, an opt-in is refused and no token is
 made; with it on, a token made without the box has only the ciphertext
@@ -729,7 +751,8 @@ message and an attachment as plain text, replies, and the reply arrives
 encrypted and marked as an agent's; a first contact is still held and the
 owner approves what they read; an OAuth consent with the box gives the
 plain-text tools and one without it the ciphertext tools; revoking removes
-the key and the statement.
+the key and the statement, and so does an OAuth grant that ends because its
+refresh token was used twice.
 
 ## Definition of done
 
