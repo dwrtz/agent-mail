@@ -177,7 +177,7 @@ Run on 2026-11-22 against this commit, locally:
   - 11 browser steps (sign-up, key setup, compose with attachment, approve,
     read and reply, read mark, group thread, add an agent, approve a held
     message, OAuth consent, the server-key opt-in, contacts and mobile)
-- `npm run e2e:cli` (one local instance): 19/19 pass (send with attachment,
+- `npm run e2e:cli` (one local instance): 20/20 pass (send with attachment,
   requests, approve, pull + decrypt, reply, ack, threads, save, agent file,
   `watch --once`, and the local MCP server over stdio, including its file
   folder limits).

@@ -11,8 +11,8 @@ import { writeFileSync as writeFileSync2 } from "node:fs";
 import { spawn } from "node:child_process";
 
 // cli/src/agent.ts
-import { readFileSync, writeFileSync, existsSync, realpathSync, mkdirSync } from "node:fs";
-import { basename, dirname, resolve, sep } from "node:path";
+import { readFileSync, writeFileSync, lstatSync, realpathSync, mkdirSync } from "node:fs";
+import { basename, join, resolve, sep } from "node:path";
 
 // cli/src/mcp-client.ts
 var McpClient = class {
@@ -3488,12 +3488,28 @@ function loadConfig(env) {
 function insideDir(dir, p) {
   mkdirSync(dir, { recursive: true });
   const base = realpathSync(dir);
+  const outside = () => new Error(`files must be inside ${base}`);
+  const within = (x) => x === base || x.startsWith(base + sep);
   const full = resolve(base, String(p));
-  let probe = full;
-  while (!existsSync(probe)) probe = dirname(probe);
-  const real = realpathSync(probe) + full.slice(probe.length);
-  if (real !== base && !real.startsWith(base + sep)) throw new Error(`files must be inside ${base}`);
-  return real;
+  if (!within(full)) throw outside();
+  let cur = base;
+  for (const part of full.slice(base.length).split(sep).filter(Boolean)) {
+    cur = join(cur, part);
+    let link = false;
+    try {
+      link = lstatSync(cur).isSymbolicLink();
+    } catch {
+      continue;
+    }
+    if (!link) continue;
+    try {
+      cur = realpathSync(cur);
+    } catch {
+      throw outside();
+    }
+    if (!within(cur)) throw outside();
+  }
+  return cur;
 }
 var short = shortActor;
 var Agent = class {

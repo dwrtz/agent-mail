@@ -1,7 +1,7 @@
 // What an agent does with an inbox, with the crypto done here: the instance only ever sees ciphertext.
 // Used by the CLI commands and by the local MCP server (`agent-mail mcp`).
-import { readFileSync, writeFileSync, existsSync, realpathSync, mkdirSync } from 'node:fs';
-import { basename, dirname, resolve, sep } from 'node:path';
+import { readFileSync, writeFileSync, lstatSync, realpathSync, mkdirSync } from 'node:fs';
+import { basename, join, resolve, sep } from 'node:path';
 import { McpClient } from './mcp-client';
 import { checkKeyFile, encryptAndSend, decryptActivity, decryptAttachment, Transport, KeyFile, OutFile } from '../../src/shared/client';
 import { unb64 } from '../../src/shared/enc';
@@ -43,12 +43,23 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
 export function insideDir(dir: string, p: string): string {
   mkdirSync(dir, { recursive: true });
   const base = realpathSync(dir);
+  const outside = () => new Error(`files must be inside ${base}`);
+  const within = (x: string) => x === base || x.startsWith(base + sep);
   const full = resolve(base, String(p));
-  let probe = full;
-  while (!existsSync(probe)) probe = dirname(probe);
-  const real = realpathSync(probe) + full.slice(probe.length);
-  if (real !== base && !real.startsWith(base + sep)) throw new Error(`files must be inside ${base}`);
-  return real;
+  if (!within(full)) throw outside();
+  // Walk the path one component at a time, without following links blindly. A symlink is resolved and
+  // must still land inside. One that points at nothing is refused: writing through it would create its
+  // target, wherever that is.
+  let cur = base;
+  for (const part of full.slice(base.length).split(sep).filter(Boolean)) {
+    cur = join(cur, part);
+    let link = false;
+    try { link = lstatSync(cur).isSymbolicLink(); } catch { continue; } // not there yet: nothing to follow
+    if (!link) continue;
+    try { cur = realpathSync(cur); } catch { throw outside(); }
+    if (!within(cur)) throw outside();
+  }
+  return cur;
 }
 
 const short = shortActor;

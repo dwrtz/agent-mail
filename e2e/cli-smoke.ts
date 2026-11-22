@@ -1,7 +1,7 @@
 // npm run e2e:cli: one local instance, two users, the agent-mail CLI end to end (send with attachment, requests,
 // approve, pull + decrypt, attachment download, reply, ack).
 import { spawn, execSync, execFileSync, ChildProcess } from 'node:child_process';
-import { rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
 import { Account, waitFor } from './lib';
 
 const URL_ = 'http://localhost:8796';
@@ -100,10 +100,19 @@ async function main() {
     // Files: only inside the agent's folder, and never a key.
     const outside = await rpc('tools/call', { name: 'reply', arguments: { noteId: msg.noteId, text: 'x', attach: ['../bob.json'] } });
     const escape = await rpc('tools/call', { name: 'save_attachment', arguments: { noteId: msg.noteId, path: '/tmp/agent-mail-escape.txt' } });
+    // Links in the folder are followed only if they stay inside it; one that points at nothing is refused too
+    // (writing through it would create its target outside the folder).
+    symlinkSync('../never-created.txt', '.e2e/cli/files/dangling.txt');
+    symlinkSync('../bob.json', '.e2e/cli/files/to-key.json');
+    symlinkSync('ok.txt', '.e2e/cli/files/inside-link.txt');
+    const dangling = await rpc('tools/call', { name: 'save_attachment', arguments: { noteId: msg.noteId, path: 'dangling.txt' } });
+    const linkOut = await rpc('tools/call', { name: 'reply', arguments: { noteId: msg.noteId, text: 'x', attach: ['to-key.json'] } });
+    check('local MCP: symlinks cannot lead out of its folder', dangling.isError && /must be inside/.test(dangling.content[0].text) && !existsSync('.e2e/cli/never-created.txt') && linkOut.isError && /must be inside/.test(linkOut.content[0].text),
+      [dangling, linkOut].map(x => x.content?.[0]?.text?.slice(0, 40)).join(' | '));
     writeFileSync('.e2e/cli/files/leak.json', agentFile);
     writeFileSync('.e2e/cli/files/ok.txt', 'a file the agent may send');
     const leak = await rpc('tools/call', { name: 'reply', arguments: { noteId: msg.noteId, text: 'x', attach: ['leak.json'] } });
-    const fine = await tool('reply', { noteId: msg.noteId, text: 'With a file from my folder', attach: ['ok.txt'] });
+    const fine = await tool('reply', { noteId: msg.noteId, text: 'With a file from my folder', attach: ['ok.txt', 'inside-link.txt'] });
     check('local MCP: files outside its folder and key files are refused', outside.isError && /must be inside/.test(outside.content[0].text) && escape.isError && /must be inside/.test(escape.content[0].text) && leak.isError && /not sent/.test(leak.content[0].text) && fine.status === 'sent',
       [outside, escape, leak].map(x => x.content?.[0]?.text?.slice(0, 50)).join(' | '));
   } catch (e) { check('local MCP', false, String(e)); }
