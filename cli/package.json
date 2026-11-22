@@ -1,0 +1,12 @@
+{
+  "name": "@dwrtz/agent-mail",
+  "version": "0.2.0",
+  "description": "CLI and local MCP server for Agent Mail: an agent reads and answers end-to-end encrypted mail, with the crypto on its own machine.",
+  "type": "module",
+  "bin": { "agent-mail": "agent-mail.mjs" },
+  "files": ["agent-mail.mjs", "README.md"],
+  "engines": { "node": ">=20" },
+  "keywords": ["agent-mail", "mcp", "agents", "end-to-end encryption", "hpke"],
+  "repository": { "type": "git", "url": "git+https://github.com/dwrtz/agent-mail.git", "directory": "cli" },
+  "license": "MIT"
+}

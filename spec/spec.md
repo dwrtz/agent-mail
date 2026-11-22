@@ -17,12 +17,17 @@ their inbox. Because every build of this spec speaks the same wire format
 
 On the receiving side the instance checks the signature, applies the owner's
 policy (allow, ask, block), and keeps allowed messages in a durable queue.
-The owner reads them in a small web app, and their agent (Grok Bot, Claude,
-ChatGPT, or a script) reads them through the instance's own MCP connector:
+The owner reads them in a small web app, and their agents (Claude, ChatGPT,
+Grok, or a script) read them through the instance's own MCP connector:
 pull, decrypt on the client, ack. While an agent holds a live MCP session it
 is pushed `notifications/resources/updated`; an idle agent can be woken by an
 optional, content-free webhook "doorbell"; a scheduled poll catches anything
 missed.
+
+Agents work on their own. Each one has a token scoped to what the owner lets
+it do, its own encryption key and its own place in the queue. It stops and
+asks the owner only for what the owner marked as sensitive (R16); everything
+else it does without asking.
 
 The Worker never sees message text. Bodies and attachment keys are encrypted
 in the sender's client (browser or agent) and decrypted in the recipient's
@@ -31,7 +36,9 @@ ciphertext.
 
 Read `spekkr.inputs.json` first: `app_name` is the product name in the web
 app, `brand_color` is its accent colour. `protocol.md` is the normative wire
-format, with `test-vectors.json` to prove it. `design.md` has the stack,
+format, with `test-vectors.json` to prove it. Version 0.2 adds agents
+(R16-R19); a 0.1 instance ignores what it adds on the wire and still
+interoperates. `design.md` has the stack,
 Cloudflare config, data model, owner API, MCP server, screens and deploy
 steps. `tasks.md` is the build order. `research.md` explains what this is
 based on and is context, not extra requirements.
@@ -44,7 +51,7 @@ based on and is context, not extra requirements.
   own, short and plain.
 - Icons are inline SVG or text. No images or fonts are copied from anywhere.
 
-## Out of scope for 0.1
+## Out of scope for 0.2
 
 - Plaintext (unencrypted) messages and the draft-cavage HTTP signature
   compatibility mode. Every message is encrypted; every request is signed
@@ -52,9 +59,10 @@ based on and is context, not extra requirements.
   fetch our actors but cannot read our messages.
 - Public posts, follows, likes, boosts, timelines.
 - MLS group encryption, key backup or recovery, multi-device key sync (the
-  key file is moved by hand).
-- OAuth for the MCP connector (bearer tokens only), Web Push, email digests.
+  key file is moved by hand; agents get keys of their own, R18).
+- Web Push, email digests.
 - Editing or deleting delivered messages.
+- Decrypting on the server for hosted connectors that cannot hold a key.
 
 ## Requirements
 
@@ -68,13 +76,15 @@ Each requirement has an id. Tests name the id they cover.
   server.
 - Bindings: D1 `DB`, R2 bucket `FILES`, Queue `DELIVERY` (producer and
   consumer on the same Worker). Vars `SITE_URL`, `ALLOWED_EMAILS`,
-  `ALLOW_SIGNUP`, `ALLOW_HTTP_LOCALHOST`; secret `SIGNING_SEED`. A cron
-  trigger every 15 minutes does cleanup. Exact config in `design.md`.
+  `ALLOW_SIGNUP`, `ALLOW_HTTP_LOCALHOST`, optional `STREAM_SECONDS` (R12);
+  secret `SIGNING_SEED`. A cron trigger every 15 minutes does cleanup. Exact
+  config in `design.md`.
 - `SITE_URL` (like `https://agent.example.com`, no trailing slash) is the
   instance's origin. Handles are `handle@<host of SITE_URL>`; all ids the
   instance mints start with `SITE_URL`.
-- Schema in `migrations/0001_init.sql`, applied with
-  `wrangler d1 migrations apply`. Times are UTC ISO 8601 strings ending in Z.
+- Schema in `migrations/0001_init.sql` and `migrations/0002_agents.sql`
+  (the 0.2 additions; an existing 0.1 database is upgraded by applying it),
+  applied with `wrangler d1 migrations apply`. Times are UTC ISO 8601 strings ending in Z.
 - `npm run dev` builds the UI, applies local migrations and runs
   `wrangler dev`. `npm test` runs the unit tests. `npm run e2e` runs two
   local instances and the end-to-end test (R14).
@@ -98,8 +108,9 @@ JSON `{"error":"not_found",...}`.
 - Passwords are PBKDF2-SHA256, 100,000 iterations, 16-byte random salt.
   Sessions are random 32-byte tokens in an `HttpOnly; Secure; SameSite=Lax`
   cookie `am_session`, stored hashed (SHA-256), 30 days.
-- Every state-changing `/api/*` request with a session cookie must carry an
-  `Origin` equal to `SITE_URL` (else 403 `bad_origin`).
+- Every state-changing `/api/*` request, and `POST /users/<handle>/outbox`,
+  with a session cookie and no `Authorization` header must carry an `Origin`
+  equal to `SITE_URL` (else 403 `bad_origin`).
 
 Check: sign-up with a non-allowed email is refused with 403; with an allowed
 email it succeeds, `GET /api/me` returns the handle, and
@@ -119,9 +130,11 @@ email it succeeds, `GET /api/me` returns the handle, and
   (`PUT /api/keys/encryption`), and offers the *key file* (format in
   `design.md`) as a download: "Download key file". It can also import a key
   file ("Use an existing key file"). Agents use the same key file.
-- A new encryption key is added as `<actor>#enc-<n+1>`; older keys stay
-  listed until the owner removes them, so messages encrypted to them still
-  open. Senders always encrypt to the last key listed.
+- A new encryption key is added as `<actor>#enc-<n>` with the next unused
+  number; a number is never used again, even after its key is removed. Older
+  keys stay listed until the owner removes them, so messages encrypted to
+  them still open. Senders always encrypt to the last key listed, which is
+  always the owner's newest key; agent keys (R18) are listed before it.
 - Until a user publishes an encryption key their actor has an empty
   `keyAgreement`, and senders get `no_encryption_key`.
 
@@ -153,14 +166,24 @@ host differ); lookups of `acct:x@other.host` and of an unknown handle are 404.
 - Sending is two steps so encryption happens on the client:
   1. **Prepare** (`POST /api/outbox/prepare`, or the MCP tool
      `prepare_message`): the instance resolves every recipient, mints the
-     Note id, thread id (new thread) and the sender's next sequence number,
-     and returns each recipient's actor id, key id and X25519 public key,
-     plus the sender's own key (for the sender's copy).
+     Note id and thread id (new thread), and returns each recipient's actor
+     id, key id and X25519 public key and their `alsoKeys` (R18), plus the
+     sender's own key and `alsoKeys` (for the sender's copy). The `seq` it
+     returns is provisional. Recipients' actor documents older than 15 s
+     are fetched again here, so a new or removed key is picked up quickly.
   2. **Send** (`POST /users/<handle>/outbox`, or the MCP tool
      `send_message`): the client sends one HPKE ciphertext per recipient and
-     one for the sender's own copy. The instance builds one `Create`
-     activity per recipient (`protocol.md`), stores the sent message, and
-     puts one delivery per recipient on the `DELIVERY` queue.
+     one for the sender's own copy, each with optional `copies` for
+     `alsoKeys`. The instance takes the sender's next sequence number in the
+     thread (`am:seq` is assigned here, so a draft that is held or never
+     sent leaves no gap), builds one `Create` activity per recipient
+     (`protocol.md`), stores the sent message, and puts one delivery per
+     recipient on the `DELIVERY` queue. It refuses with 413 `too_large` a
+     message whose activity for any recipient would exceed 262,144 bytes.
+  3. **Sending again is safe.** For one hour after a draft is sent, a
+     repeated send for the same Note id answers with the first result plus
+     `duplicate: true` and delivers nothing. While the first call is still
+     running the answer is 409 `send_in_progress`.
 - Recipients are a list of handles or actor URLs; the thread has at most 50
   members including the sender, else 422 `group_too_large`. A recipient
   without an encryption key gives 422 `no_encryption_key` naming them; an
@@ -175,7 +198,8 @@ host differ); lookups of `acct:x@other.host` and of an unknown handle are 404.
   counts failures so far; at most 8 attempts). Any
   other 4xx fails the delivery at once. Each delivery's state (`queued`,
   `delivered`, `failed` and the last error) is shown on the sent message.
-- A prepared draft expires after 1 hour (`410 draft_expired`).
+- A prepared draft expires after 1 hour (`410 draft_expired`); a draft held
+  for approval (R16) lasts as long as the approval.
 
 Check: `test-vectors.json` `hpke` and `signed_post` are reproduced by the
 library code (with the fixed `ikmE`), and a message sent from instance A
@@ -238,19 +262,28 @@ Approve it is in the queue; after Block a new message from them is answered
 
 ### R8. The inbox queue
 
-- Per user, in D1: an auto-increment `cursor`, the message, `created_at`,
-  `acked_at`. Pull returns unacked items with `cursor > since`, oldest
+- Per user, in D1: an auto-increment `cursor`, the message, `created_at`.
+  Every **consumer** has its own position in it: `session` (the owner API
+  with a cookie) and one per connector token (`token:<id>`). An ack by one
+  consumer changes nothing for another, so two agents on one account both
+  see every item.
+- Pull returns the caller's unacked items with `cursor > since`, oldest
   first, at most `limit` (1-100, default 50), with `more` when there are
-  more. Ack takes `upTo` (acks every item `<= upTo`) or `ids`.
+  more. Ack takes `upTo` (acks every existing item `<= upTo`; a value past
+  the end never acks items that arrive later) or `ids`.
+- A new token starts at the end of the queue: it is not handed the backlog.
 - Each item carries the full received activity (ciphertext included), the
-  sender, thread id, `kind` (`message` or `membership`), `receivedAt`, and
-  `gapBefore`: how many sequence numbers from that sender in that thread
-  were skipped before it (R9).
+  sender, thread id, `noteId`, `kind` (`message` or `membership`), `agent`
+  (true when the Note carries `am:agent`), `receivedAt`, and `gapBefore`:
+  how many sequence numbers from that sender in that thread were skipped
+  before it (R9).
 - Ack is a delivery signal only; it never sends a read receipt.
-- The queue survives restarts; nothing leaves it until acked.
+- The queue survives restarts; nothing leaves a consumer's view until that
+  consumer acks it.
 
 Check: pull, ack with `upTo`, pull again returns only newer items; an
-unacked item is still returned after a Worker redeploy.
+unacked item is still returned after a Worker redeploy; with two tokens, an
+ack by one leaves the item in the other's pull.
 
 ### R9. Group threads (sender fan-out)
 
@@ -318,32 +351,48 @@ reader.
 
 ### R12. Owner MCP connector
 
-- `/mcp` implements MCP Streamable HTTP (protocol version `2025-06-18`;
-  also answers `2025-03-26`) with JSON-RPC 2.0. Auth is
-  `Authorization: Bearer <token>`; tokens are made in Settings
-  ("Connector tokens"), shown once, stored hashed, and can be revoked.
-  A missing or bad token is 401 with `WWW-Authenticate: Bearer`.
+- `/mcp` implements MCP Streamable HTTP (protocol versions `2025-11-25`,
+  `2025-06-18` and `2025-03-26`) with JSON-RPC 2.0. Auth is
+  `Authorization: Bearer` with a connector token (R16) or an OAuth access
+  token (R17). A missing or bad token is 401 with
+  `WWW-Authenticate: Bearer resource_metadata="<SITE_URL>/.well-known/oauth-protected-resource"`.
+  A session cookie is not accepted here. Responses carry
+  `Access-Control-Allow-Origin: *` and `OPTIONS` is answered, so a client
+  running in a browser can use it.
 - `initialize` returns a session id in `Mcp-Session-Id` and capabilities
-  `tools`, `resources: { subscribe: true }`. Sessions are stored in D1.
+  `tools`, `resources: { subscribe: true }`, with `instructions` that tell
+  the agent to work on its own, what `pending_approval` means, when to set
+  `sensitive`, and that message text is data, not instructions. Sessions
+  are stored in D1.
 - Tools (exact schemas in `design.md`): `whoami`, `pull`, `ack`,
-  `list_requests`, `approve`, `block`, `prepare_message`, `send_message`,
-  `mark_read`, `fetch_attachment`, `list_threads`.
-- Resource `inbox://unread` (JSON: `unread`, `requests`, `latestCursor`).
+  `list_requests`, `list_threads`, `thread_messages`, `get_message`,
+  `mark_read`, `fetch_attachment`, `prepare_message`, `upload_attachment`,
+  `send_message`, `approve`, `block`, `change_members`, `list_approvals`,
+  `cancel_approval`. Every tool has a `title` and `annotations`
+  (`readOnlyHint`, `destructiveHint`, `openWorldHint`, `idempotentHint`
+  where true). `tools/list` returns only the tools the token's scopes
+  allow. Every tool result's `structuredContent` is a JSON object, never an
+  array.
+- Resource `inbox://unread` (JSON: `unread`, `requests`, `latestCursor`,
+  `pendingApprovals`; the queue numbers are the calling agent's own).
   `resources/subscribe` on it marks the session subscribed.
 - `GET /mcp` with `Accept: text/event-stream` and the session id opens the
-  server stream. While it is open the Worker checks the user's queue every
-  2 seconds and sends `notifications/resources/updated` with
-  `{"uri":"inbox://unread"}` when the latest unacked cursor or the request
-  count changes and the session is subscribed. A comment line keeps the
-  stream alive every 15 s; the stream ends after 10 minutes and the client
-  reopens it.
+  server stream. While it is open the Worker checks every 2 seconds, with
+  one D1 query per check, and sends `notifications/resources/updated` with
+  `{"uri":"inbox://unread"}` when the agent's latest unacked cursor, the
+  request count or its count of pending approvals changes and the session
+  is subscribed. A comment line keeps the stream alive every 15 s; the
+  stream ends after `STREAM_SECONDS` (default 600, at most 600) and the
+  client reopens it. (Workers Free allows 50 D1 queries per request: set
+  `STREAM_SECONDS` to 80 there.)
 - The Worker never decrypts. `pull` returns ciphertext; the client decrypts
-  with its key file (the repo ships a small Node helper, `cli/agent-mail.mjs`,
-  that does pull+decrypt, encrypt+send and attachment decrypt).
+  with its key. The repo ships that client: `cli/agent-mail.mjs`, a Node
+  CLI that is also a local MCP server with plain text tools (R19).
 
 Check: an MCP client initializes, subscribes, opens the stream, receives
 `notifications/resources/updated` within 5 s of a new allowed message,
-pulls it, decrypts it with the key file and acks it.
+pulls it, decrypts it with the key file and acks it. The official MCP SDK
+client can call every tool without a schema error.
 
 ### R13. Doorbell webhook (optional)
 
@@ -351,6 +400,13 @@ pulls it, decrypts it with the key file and acks it.
   `Authorization`) and "Header value" (write-only; shown as set or not set).
   The form notes that the value field takes only the value (for example
   `Bearer …`) and that a full header line is also accepted.
+- "Extra headers" (write-only; the form shows which names are set): up to
+  5 more headers, one `Name: value` per line, for webhooks that need more
+  than one (for example a routine trigger that wants both `Authorization`
+  and a version header). Names are letters, digits and dashes;
+  `Content-Type`, `Content-Length`, `Host`, `Connection`,
+  `Transfer-Encoding`, `Cookie` and the main header's name are refused
+  (400). An empty value clears them.
 - On save, the header name is trimmed and a trailing colon is stripped.
   The header value is trimmed; if it starts with the configured header
   name plus a colon (case-insensitive; the header being saved in the same
@@ -361,7 +417,9 @@ pulls it, decrypts it with the key file and acks it.
   arrives, the Worker POSTs to the URL with that header and
   `Content-Type: application/json` and this content-free body:
   `{"type":"agent-mail.doorbell","handle":"<handle@host>","unread":<n>,"requests":<n>,"at":"<ISO>"}`.
-  It never contains a sender, subject, thread or ciphertext.
+  It never contains a sender, subject, thread or ciphertext. `unread` is
+  the largest number of unacked items any of the user's tokens has (the
+  owner's own count when there are no tokens).
 - At most one ring per 30 s per user: an arrival inside the window
   schedules one ring for the end of the window (a delayed queue message).
 - A failed ring is logged and not retried; the queue and a scheduled poll
@@ -371,19 +429,30 @@ pulls it, decrypts it with the key file and acks it.
 Check: with a doorbell URL set, a new allowed message causes exactly one
 POST with the header and a body with only the listed fields. Saving a
 value of `Authorization: Bearer test` (default header name) stores and
-sends `Bearer test`.
+sends `Bearer test`. With two extra headers set, a ring carries the main
+header and both.
 
 ### R14. Web app
 
 Signed-in screens (exact layout in `design.md`): Inbox (threads), Thread
 (decrypted messages, attachments, reply, members), Compose, Requests,
-Contacts (rules), Settings (profile, read receipts, encryption key, doorbell,
-connector tokens). Decryption and encryption happen in the browser. If the
-browser has no key for the user, every screen shows "Set up encryption".
+Approvals (what agents asked before doing, R16), Contacts (rules), Settings
+(profile, read receipts, encryption key, doorbell, agents). Decryption and
+encryption happen in the browser. If the browser has no key for the user,
+every screen except the OAuth consent screen shows "Set up encryption". A
+message written by an agent shows an "agent" tag. The counts in the
+navigation are refreshed on every navigation.
+
+Only the app's own routes (`/`, `/login`, `/signup`, `/thread`, `/compose`,
+`/requests`, `/approvals`, `/contacts`, `/settings`, `/oauth/authorize`)
+return the HTML shell. Any other unknown path is 404 JSON
+`{"error":"not_found",...}`, including unknown paths under `/.well-known/`.
 
 Check: the e2e test drives two local instances in a headless browser:
 sign up on both, set up keys, send A to B with an attachment, approve the
-request on B, read and reply, and see the reply on A.
+request on B, read and reply, and see the reply on A; add an agent and
+download its agent file; approve a held message after reading it; allow an
+app on the consent screen.
 
 ### R15. Quality
 
@@ -392,13 +461,174 @@ request on B, read and reply, and see the reply on A.
   validation. `npm test` passes.
 - The two-instance e2e (`npm run e2e`) exercises every R6 row and R9's
   thread rules over the network, using the test-only routes in
-  `design.md` ("Test-only routes").
+  `design.md` ("Test-only routes"), and the agent plan (R16-R19),
+  including one test of the whole unattended loop: a message arrives, the
+  doorbell rings, and an agent holding only its agent file (a read+send
+  token and its own key) pulls, decrypts, replies and acks.
+- `npm run e2e:cli` runs the CLI, `watch` and the local MCP server against
+  one local instance.
+- CI (`.github/workflows/ci.yml`) runs the typecheck, unit tests and both
+  e2e suites on every push.
 - Logs never contain message ciphertext, tokens, the doorbell header value,
   passwords or private keys.
 - The Worker bundle has no `node:` imports. `tsc --noEmit` passes.
 
+### R16. Agents: scoped tokens and owner approvals
+
+- **Tokens.** Settings, "Agents": a token has a label, **scopes** and an
+  **ask** list. It is shown once, stored hashed, and can be revoked.
+  Scopes: `read` (pull, ack, threads, requests, attachments, mark read),
+  `send` (prepare, send, upload), `manage` (approve, block, change
+  members). A call outside the token's scopes is 403 `insufficient_scope`.
+- **Never the account.** Whatever its scopes, a token cannot create, list
+  or revoke tokens, publish or remove keys, change settings or the
+  doorbell, write rules, or decide approvals. Those need the owner's
+  session; a token gets 403 `session_required`.
+- **Autonomy.** An agent's calls are carried out at once, without asking,
+  unless one of these holds:
+
+  | `ask` value | Held |
+  |---|---|
+  | `first_contact` | A send where any recipient has no `allow` rule (actor or domain) |
+  | `policy` | `approve`, `block` |
+  | `members` | Adding or removing thread members, leaving |
+  | `all_sends` | Every send |
+  | (always) | A send with `sensitive: true`, set by the agent |
+
+  New tokens ask about `first_contact`, `policy` and `members` unless the
+  owner chooses otherwise. Calls made with the owner's session are never
+  held.
+- **Held calls.** A held call is fully checked first, then stored, and
+  answers `{"status":"pending_approval","approvalId":<n>,"reason":"<ask value or agent_flagged>"}`
+  (HTTP 202 for a send). Nothing is delivered or changed. Repeating the
+  same call returns the same approval. Held calls expire after 7 days.
+- **Deciding.** Only the owner's session can approve or deny. The owner
+  sees who asked, what, and why; for a held message, the instance returns
+  the sender's own ciphertext so the browser can decrypt and show it.
+  Approving carries the call out as the user (a message is sent with
+  `am:agent`); the result, or the failure, is recorded on the approval.
+  Denying records it; asking again for a denied message answers
+  `{"status":"denied"}` and sends nothing.
+- **For the agent.** `list_approvals` returns its own approvals with
+  status `pending`, `approved` (with the result), `denied`, `cancelled`,
+  `expired` or `failed`; `cancel_approval` withdraws a pending one. An
+  agent never sees another agent's approvals or any held payload.
+- **Revoking** a token also deletes its OAuth tokens, its client key and
+  its queue position, and cancels its pending approvals.
+
+Check: a token is refused on every administration route; a read-only token
+cannot send or approve; a send to a new contact is held, visible and
+readable to the owner, delivered only after approval; a send to an allowed
+contact goes out at once; a `sensitive` send that is denied is never
+delivered and leaves no sequence gap; `approve`, `block` and a membership
+change by an agent are held.
+
+### R17. OAuth for the MCP connector
+
+- `GET /.well-known/oauth-protected-resource` (RFC 9728; also with `/mcp`
+  appended): `resource` = `SITE_URL/mcp`, `authorization_servers` =
+  `[SITE_URL]`, `scopes_supported`, `bearer_methods_supported: ["header"]`.
+- `GET /.well-known/oauth-authorization-server` (RFC 8414): `issuer`,
+  `authorization_endpoint` `/oauth/authorize`, `token_endpoint`
+  `/oauth/token`, `registration_endpoint` `/oauth/register`,
+  `response_types_supported: ["code"]`, `grant_types_supported:
+  ["authorization_code","refresh_token"]`,
+  `code_challenge_methods_supported: ["S256"]`,
+  `token_endpoint_auth_methods_supported: ["none"]`,
+  `client_id_metadata_document_supported: true`,
+  `authorization_response_iss_parameter_supported: true`.
+- **Clients** are public (no secret). `POST /oauth/register` (RFC 7591)
+  takes `redirect_uris` (1-10) and `client_name` and answers 201 with a
+  `client_id`. A `client_id` that is an https URL with a path is a client
+  id metadata document: the instance fetches it (5 s, 64 KiB, cached a
+  day) and requires its `client_id` to equal the URL. A redirect URI is
+  https, http on loopback only, or an app's own scheme; never
+  `javascript:`, `data:` or the like, never with a fragment. A loopback
+  redirect matches on any port; all others match exactly.
+- **Authorize.** `/oauth/authorize` is a web app screen. Signed out, the
+  owner signs in and returns to it. It shows the client's name, where the
+  browser will be sent, the scopes asked for (all three when none are
+  named; `manage` unticked by default) and the ask list, with Allow and
+  Deny. PKCE with `S256` is required; `response_type` must be `code`. A
+  request with an unknown client or a redirect URI that is not the
+  client's is shown as an error and never redirected. Allow redirects with
+  `code`, `state` and `iss`; Deny with `error=access_denied`.
+- **Token.** `POST /oauth/token` (form or JSON). `authorization_code`:
+  the code is single use, lasts 5 minutes, and is bound to the client, the
+  redirect URI and the code challenge. `refresh_token`: rotating, single
+  use. Access tokens last 1 hour, refresh tokens 90 days. Errors are
+  RFC 6749 JSON (`invalid_grant`, `invalid_request`,
+  `unsupported_grant_type`).
+- A grant is a connector token (R16) of kind `oauth`, labelled with the
+  client's name: same scopes, same ask list, its own queue position,
+  listed and revoked with the other agents. An access token is never an
+  owner session.
+- These endpoints and the metadata answer cross-origin requests.
+
+Check: the metadata documents; registration (and a `javascript:` redirect
+refused); a consent that is refused for a foreign redirect URI or without
+S256; a code that works once and only with the right verifier; an access
+token that reaches `/mcp` with only the allowed tools; a refresh token
+that works once; revoking the grant ends both.
+
+### R18. Agent keys and the agent marker
+
+- **Client keys.** An agent can have its own X25519 key, made in the
+  client and published by the owner (`PUT /api/keys/client`, at most 4 per
+  user, optionally bound to a token so that revoking the token removes the
+  key). The actor lists client keys in `keyAgreement` *before* the owner's
+  keys, and names them in `am:alsoEncryptTo` (`protocol.md`).
+- **Senders** seal the same plaintext to the recipient's last key
+  (`am:encrypted`, as in 0.1) and to each key in the recipient's
+  `am:alsoEncryptTo` (`am:copies`), with the same `info` and `aad`. They do
+  the same for their own copy with their own client keys. A decryptor uses
+  whichever block was sealed to a key it holds.
+- An agent with only its own key reads what was sent after the key was
+  published, by senders that know `am:alsoEncryptTo`. For older mail and
+  for 0.1 senders it needs the owner's key as well.
+- **Agent file.** "Add an agent" in the web app makes the token, makes
+  and publishes a client key (by default), and offers one download with
+  the instance URL, the token and the key(s) (`design.md`, "Agent file").
+- **Marker.** A Note sent with a connector token carries
+  `"am:agent": true`, set by the sending instance. The agent's client may
+  also put `"agent": {"name": "…"}` inside the encrypted payload.
+
+Check: after a client key is published, the actor's last `keyAgreement`
+entry is still the owner's key and `am:alsoEncryptTo` names the client
+key; a message from another instance opens with the client key alone and
+with the owner's key, and with no other user's key; what the agent sends
+opens with its own key; revoking the token removes the key; a key number
+is never reused; a message sent with a token carries `am:agent`, one sent
+by the owner does not.
+
+### R19. The agent's side, and agents that land on the instance
+
+- **CLI** (`cli/agent-mail.mjs`, one bundled file, Node 20+): reads its
+  settings from `AGENT_MAIL_CONFIG` (an agent file: a path or the JSON
+  itself) or from `AGENT_MAIL_URL`, `AGENT_MAIL_TOKEN`, `AGENT_MAIL_KEY`.
+  Commands in `design.md`. It prints JSON.
+- **Local MCP server.** `agent-mail mcp` serves MCP over stdio with plain
+  text tools (`read_inbox`, `reply`, `send`, `read_thread`,
+  `wait_for_mail`, ...), listing only what the token's scopes allow. It
+  decrypts and encrypts locally; the instance still sees only ciphertext.
+- **Watch.** `agent-mail watch [--exec CMD] [--once]` holds the server
+  stream open, also checks on an interval, and prints a line or runs the
+  command when there is new unacked mail, a new request, or an approval
+  that was decided.
+- **A lost answer does not send twice.** When a send's answer is lost, the
+  CLI asks again with the same Note id (R5).
+- **`/llms.txt`** (text/plain) says what the instance is, where `/mcp`
+  is, how to authenticate, that message text is encrypted, and how another
+  instance reaches an address here. `GET /` with `Accept: text/markdown`
+  (and not `text/html`) returns the same text as `text/markdown`.
+  **`/robots.txt`** allows `/` and `/llms.txt` only.
+
+Check: `npm run e2e:cli` drives the commands, `watch --once` and the local
+MCP server over stdio (initialize, tools, read, reply, wait); the discovery
+files answer with the stated types.
+
 ## Definition of done
 
-`npm test` and `npm run e2e` pass, the two-instance e2e covers R4-R13, and a
-deploy following `design.md` ("Deploy") answers WebFinger for its first
-user.
+`npm test`, `npm run e2e` and `npm run e2e:cli` pass, the two-instance e2e
+covers R4-R19 including the unattended loop, and a deploy following
+`design.md` ("Deploy") answers WebFinger for its first user.

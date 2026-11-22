@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck (Worker, web app, CLI and tests)
+        run: npm run typecheck
+      - name: Unit tests (spec vectors, activity shapes, client sealing)
+        run: npm test
+      - name: The committed CLI bundle matches its source
+        run: npm run build:cli && git diff --exit-code -- cli/agent-mail.mjs
+      - run: npx playwright install --with-deps chromium
+      - name: Two local instances, the full test plan and the browser pass
+        run: npm run e2e
+      - name: The CLI, watch and the local MCP server
+        run: npm run e2e:cli
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: |
+            .e2e/results.json
+            .e2e/shots
+          if-no-files-found: ignore

@@ -49,7 +49,45 @@ context, not extra requirements.
 - Read receipts are opt-in and separate from queue ack.
 - Signing keys are held by the Worker (derived from one secret), so the
   outbox can sign as the user; encryption keys are held only by clients.
-- Bearer tokens for MCP in 0.1; OAuth later.
+- Bearer tokens for MCP in 0.1; OAuth later (added in 0.2, below).
+
+## Choices made for 0.2 (agents)
+
+- **Autonomy first, approvals for what is sensitive.** An agent that asks
+  about everything is not useful, and one that can do everything is not
+  safe. The owner picks, per agent, the few kinds of action to be asked
+  about (the defaults: writing to someone new, letting a stranger in or
+  shutting them out, changing a group); the agent can also flag a message
+  itself. Everything else goes through without a prompt. Because the
+  server cannot read messages, a held message is shown to the owner by
+  returning the sender's own ciphertext to their browser.
+- **A token is not the owner.** In 0.1 a connector token could mint
+  tokens and publish keys. Tokens now have scopes, and account
+  administration needs a session.
+- **One key per agent**, as an addition to the wire format that 0.1
+  ignores: the actor names extra keys in `am:alsoEncryptTo` and senders
+  add `am:copies`. The owner's key stays last in `keyAgreement`, which is
+  the key 0.1 senders use. Copies repeat the ciphertext, so they are
+  capped at 4 and the sender checks the 256 KiB inbox limit; a content key
+  wrapped per recipient key would be smaller but would change
+  `am:encrypted` itself and break 0.1 receivers.
+- **OAuth 2.1 as MCP clients expect it** (RFC 9728 and 8414 metadata,
+  RFC 7591 registration, client id metadata documents, PKCE), with the
+  grant stored as an ordinary scoped token. A hosted connector that can
+  only call tools still gets ciphertext: decrypting on the server for it
+  would give up the promise that the Worker never sees message text, and
+  is left out.
+- **The plain-text surface is local.** `agent-mail mcp` runs next to the
+  agent and holds its key, so MCP clients get readable tools without the
+  instance learning anything.
+- **The doorbell stays content-free** but can carry several headers,
+  because real triggers (a Claude Code routine's fire endpoint, for one)
+  want more than one. Live `resources/updated` notifications are kept, but
+  common MCP clients do not act on them, so `watch` and the doorbell are
+  the practical wake paths.
+- **MCP protocol versions.** The server answers `2025-11-25` and older.
+  Revision `2026-07-28` was not implemented; clients that speak it fall
+  back.
 
 ## How it was checked
 

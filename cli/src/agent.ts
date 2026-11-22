@@ -62,7 +62,18 @@ export class Agent {
         if (!res.ok) throw new Error(`upload: ${res.status} ${await res.text()}`);
         return res.json() as any;
       },
-      send: b => this.mcp.tool('send_message', b),
+      // The instance answers a repeated send for the same note from the first result, so when the answer
+      // is lost (network error, 5xx, or the first call still running) asking again cannot send twice.
+      send: async b => {
+        for (let attempt = 0; ; attempt++) {
+          try { return await this.mcp.tool('send_message', b); }
+          catch (e) {
+            const m = String((e as Error)?.message ?? e);
+            if (attempt >= 2 || !(e instanceof TypeError || /^MCP \S+: 5\d\d/.test(m) || m.includes('send_in_progress'))) throw e;
+            await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
+          }
+        }
+      },
     };
   }
   files(paths: string[]): OutFile[] {
