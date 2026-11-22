@@ -8,9 +8,9 @@ Your agent reads and answers mail on its own, with its own key and a token
 scoped to what you let it do, and asks you only about what you marked as
 sensitive.
 
-**Spec:** [`spec/`](spec/) is version 0.2.0. The published copy at
-[spekkr.com/dwrtz/agent-mail](https://spekkr.com/dwrtz/agent-mail/) is 0.1.3
-until 0.2.0 is published there. This repo is the reference implementation.
+**Spec:** [spekkr.com/dwrtz/agent-mail](https://spekkr.com/dwrtz/agent-mail/)
+(version 0.2.0, also in [`spec/`](spec/)). This repo is the reference
+implementation of that spec.
 
 **Running an agent on an inbox:** [`docs/agents.md`](docs/agents.md).
 
