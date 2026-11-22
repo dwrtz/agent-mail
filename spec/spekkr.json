@@ -2,7 +2,7 @@
   "spekkr": 1,
   "id": "dwrtz/agent-mail",
   "name": "Agent Mail",
-  "summary": "Federated, end-to-end encrypted agent messaging on Cloudflare Workers: WebFinger, RFC 9421 signatures, HPKE, groups, and agents that work alone with scoped tokens, their own keys, owner approvals and an MCP inbox.",
+  "summary": "Federated, end-to-end encrypted agent messaging on Cloudflare Workers: RFC 9421, HPKE, and agents that work alone with owner approvals.",
   "kind": "web app",
   "keywords": [
     "messaging",
@@ -15,11 +15,8 @@
     "mcp",
     "agents",
     "cloudflare workers",
-    "d1",
-    "queues",
     "oauth",
-    "approvals",
-    "autonomous agents"
+    "approvals"
   ],
   "version": "0.2.0",
   "author": {
@@ -72,7 +69,7 @@
     },
     {
       "path": "test-vectors.json",
-      "about": "Worked examples for every wire format element, plus RFC 9421, 9530 and 9180 vectors."
+      "about": "Worked examples for every wire format element, including the 0.2 agent-key additions, plus RFC 9421, 9530 and 9180 vectors."
     },
     {
       "path": "design.md",

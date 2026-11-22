@@ -1,5 +1,5 @@
 {
-  "about": "agent-mail 0.1 test vectors. Byte strings are hex unless the field name ends in _b64url or the value is a header. All JSON bodies are the exact bytes sent (UTF-8, no trailing newline).",
+  "about": "agent-mail 0.1 test vectors, with the spec 0.2 additions under agent_keys. Byte strings are hex unless the field name ends in _b64url or the value is a header. All JSON bodies are the exact bytes sent (UTF-8, no trailing newline).",
   "signing_key_derivation": {
     "SIGNING_SEED_b64url": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
     "handle": "alice",
@@ -127,6 +127,164 @@
       "target_uri_changed_to_carol_inbox": "signature_invalid",
       "content_digest_header_changed": "signature_invalid"
     }
+  },
+  "agent_keys": {
+    "note": "Spec 0.2, optional on the wire. A 0.1 instance ignores am:alsoEncryptTo, am:serverKeys, am:copies and am:agent and interoperates unchanged.",
+    "actor": {
+      "request": "GET https://b.example/users/bob",
+      "content_type": "application/activity+json",
+      "response": {
+        "@context": [
+          "https://www.w3.org/ns/activitystreams",
+          "https://w3id.org/security/multikey/v1",
+          {
+            "am": "https://spekkr.com/dwrtz/agent-mail/ns#",
+            "keyAgreement": {
+              "@id": "https://w3id.org/security#keyAgreementMethod",
+              "@type": "@id"
+            }
+          }
+        ],
+        "id": "https://b.example/users/bob",
+        "type": "Person",
+        "preferredUsername": "bob",
+        "name": "Bob",
+        "inbox": "https://b.example/users/bob/inbox",
+        "outbox": "https://b.example/users/bob/outbox",
+        "assertionMethod": [
+          {
+            "id": "https://b.example/users/bob#sig-1",
+            "type": "Multikey",
+            "controller": "https://b.example/users/bob",
+            "publicKeyMultibase": "z6MkrpekHDhksVsDc7VSAndDktLjCihe5VjfXWkBiX76NFuQ"
+          }
+        ],
+        "keyAgreement": [
+          {
+            "id": "https://b.example/users/bob#enc-2",
+            "type": "Multikey",
+            "controller": "https://b.example/users/bob",
+            "publicKeyMultibase": "z6LSjSQm6pgfnT7VztkQ5VLQ4T12muUZ8Nag8avYTGsS73xM"
+          },
+          {
+            "id": "https://b.example/users/bob#enc-1",
+            "type": "Multikey",
+            "controller": "https://b.example/users/bob",
+            "publicKeyMultibase": "z6LSqrcbK3Siy6nigqksUoHEEx32PPGm7HhJVJUsipHBhfNE"
+          }
+        ],
+        "am:protocol": "agent-mail/0.1",
+        "am:readReceipts": false,
+        "am:alsoEncryptTo": [
+          "https://b.example/users/bob#enc-2"
+        ]
+      },
+      "expected": "The client key #enc-2 is listed before the owner key, so the last keyAgreement entry is still #enc-1. A sender seals am:encrypted to #enc-1 and one copy to #enc-2."
+    },
+    "actor_when_the_instance_holds_the_key": {
+      "response": {
+        "@context": [
+          "https://www.w3.org/ns/activitystreams",
+          "https://w3id.org/security/multikey/v1",
+          {
+            "am": "https://spekkr.com/dwrtz/agent-mail/ns#",
+            "keyAgreement": {
+              "@id": "https://w3id.org/security#keyAgreementMethod",
+              "@type": "@id"
+            }
+          }
+        ],
+        "id": "https://b.example/users/bob",
+        "type": "Person",
+        "preferredUsername": "bob",
+        "name": "Bob",
+        "inbox": "https://b.example/users/bob/inbox",
+        "outbox": "https://b.example/users/bob/outbox",
+        "assertionMethod": [
+          {
+            "id": "https://b.example/users/bob#sig-1",
+            "type": "Multikey",
+            "controller": "https://b.example/users/bob",
+            "publicKeyMultibase": "z6MkrpekHDhksVsDc7VSAndDktLjCihe5VjfXWkBiX76NFuQ"
+          }
+        ],
+        "keyAgreement": [
+          {
+            "id": "https://b.example/users/bob#enc-2",
+            "type": "Multikey",
+            "controller": "https://b.example/users/bob",
+            "publicKeyMultibase": "z6LSjSQm6pgfnT7VztkQ5VLQ4T12muUZ8Nag8avYTGsS73xM"
+          },
+          {
+            "id": "https://b.example/users/bob#enc-1",
+            "type": "Multikey",
+            "controller": "https://b.example/users/bob",
+            "publicKeyMultibase": "z6LSqrcbK3Siy6nigqksUoHEEx32PPGm7HhJVJUsipHBhfNE"
+          }
+        ],
+        "am:protocol": "agent-mail/0.1",
+        "am:readReceipts": false,
+        "am:alsoEncryptTo": [
+          "https://b.example/users/bob#enc-2"
+        ],
+        "am:serverKeys": [
+          "https://b.example/users/bob#enc-2"
+        ]
+      },
+      "expected": "Same actor, with am:serverKeys naming the client key whose private half the instance holds (the owner opted in). Senders treat the key as any other client key."
+    },
+    "copy": {
+      "key_id": "https://b.example/users/bob#enc-2",
+      "recipient_private": "3b11169936f014e023090d359feca0aec12acbb9e724531cc44592a37599df79",
+      "recipient_public": "7356bcc12165346baa003898036ba0a13015dfe0c8b23555430a452f2339bf52",
+      "ikmE": "b4ffabd2b268363880f9e8ad89e8637d6ca5f96ac300095dafb9bed7f418d827",
+      "info_utf8": "agent-mail/0.1 note",
+      "aad_utf8": "https://a.example/users/alice/notes/0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0\nhttps://b.example/users/bob",
+      "plaintext_utf8": "{\"v\":1,\"summary\":\"Lunch?\",\"content\":\"Are you free for lunch on Friday?\",\"attachments\":[{\"url\":\"https://a.example/attachments/6b0c2f3e9d1a4c7e8f00112233445566\",\"name\":\"hello.txt\",\"mediaType\":\"text/plain\",\"size\":17,\"key\":\"ERERERERERERERERERERERERERERERERERERERERERE\",\"iv\":\"IiIiIiIiIiIiIiIi\"}]}",
+      "enc_b64url": "MMgd69rqAdFMX4bfcEv0UFbFAKg-qOZEeoPVK-boaUU",
+      "ct_b64url": "WkWjnm-YHTgTZkhbR1L7mrQftVnArrusvluo25HRr-YDL8_6WP4u-2LBHETujK6NfOq0aK32d5VRqeSFLnUmRIu30ey-D5Mlk2ZE4rcedXJz_nznFq-DenhrcF1XJpkw85JtAJcwzeB4kST5hsYfX5A30a68X1X_4eLQHRm5DWYLwwkYDoai7-pmnZL7Z7ZRZXAwhOS8JK4pvGWwLlkIrWjlbXKKBkK8z3tocpwAO4QWVW27t8gFYUrf363aLfStNAxN9JAhbzB7h8RgBLkel6fxD-KMF5L5NFHsFIzhIz6BJZZVWL5TVHIHQz-0kvMMPFjBoF8c_2QlJYT8S6P8Y-DzFa36206ykI3AxBRDbtuBZBA9ty1OI4BCamWTcLRbeivPCfl-mG5RU8tNg07Ss6Z3ew",
+      "expected": "The same plaintext, info and aad as the hpke vector, sealed to the client key. Opening enc/ct with recipient_private gives plaintext_utf8."
+    },
+    "note_object": {
+      "id": "https://a.example/users/alice/notes/0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0",
+      "type": "Note",
+      "attributedTo": "https://a.example/users/alice",
+      "to": [
+        "https://b.example/users/bob"
+      ],
+      "published": "2026-11-17T02:00:00Z",
+      "context": "https://a.example/users/alice/threads/5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d",
+      "inReplyTo": null,
+      "content": "This message is end-to-end encrypted.",
+      "am:seq": 1,
+      "am:encrypted": {
+        "kem": 32,
+        "kdf": 1,
+        "aead": 1,
+        "recipient": "https://b.example/users/bob",
+        "keyId": "https://b.example/users/bob#enc-1",
+        "enc": "S7b0vOICCmCoZto2L2rGC4431M1xdAJQbMo3CVRkdy4",
+        "ct": "g1ZGFMmri85Yp0wetRhe5nIB2Zw0KpydZPXPfxHtdGIb2HMLD24tU8swTa0MkPBCFqg2FAGhvdbLJ2_Yy5egSrgD8p6nuL6NeQ5UM9SwhaXoUFhVec9SeFLCz6MFn60idncDMVxo--P0zBR5_9fMDgRHek8TaJRQdBUBtQhozbJOVGFvRy-5R4f-PebzZdxuOfdz9-1UdU__-nQHCA9JOhcGiUZydhY37WlkWWyCHzXDDIXXxo3DH13aqzED0kmvxRIPJHwMPvmPKFUkAyFDt_atP77QvEiwWN53fmSt3VTtdBU3LWJ29KQ1e9sOvq3l9aq1cpBN-nmGe400oGVHpRRqQ8Ml3Zn9cDufc9_4qULB0d7yfXBx6SiFyiWDqSvxrIKCHZwN53d4t_Cf-N3aCMUU0Q"
+      },
+      "attachment": [
+        {
+          "type": "Document",
+          "url": "https://a.example/attachments/6b0c2f3e9d1a4c7e8f00112233445566",
+          "mediaType": "application/octet-stream",
+          "am:size": 33,
+          "am:digest": "sha-256=:51OZ7zzoVN22bfHM8rQRDF8P1G+W44cFyHdiKH4kmUo=:"
+        }
+      ],
+      "am:copies": [
+        {
+          "keyId": "https://b.example/users/bob#enc-2",
+          "enc": "MMgd69rqAdFMX4bfcEv0UFbFAKg-qOZEeoPVK-boaUU",
+          "ct": "WkWjnm-YHTgTZkhbR1L7mrQftVnArrusvluo25HRr-YDL8_6WP4u-2LBHETujK6NfOq0aK32d5VRqeSFLnUmRIu30ey-D5Mlk2ZE4rcedXJz_nznFq-DenhrcF1XJpkw85JtAJcwzeB4kST5hsYfX5A30a68X1X_4eLQHRm5DWYLwwkYDoai7-pmnZL7Z7ZRZXAwhOS8JK4pvGWwLlkIrWjlbXKKBkK8z3tocpwAO4QWVW27t8gFYUrf363aLfStNAxN9JAhbzB7h8RgBLkel6fxD-KMF5L5NFHsFIzhIz6BJZZVWL5TVHIHQz-0kvMMPFjBoF8c_2QlJYT8S6P8Y-DzFa36206ykI3AxBRDbtuBZBA9ty1OI4BCamWTcLRbeivPCfl-mG5RU8tNg07Ss6Z3ew"
+        }
+      ],
+      "am:agent": true
+    },
+    "note_expected": "The Note of the signed_post vector as an agent of alice would send it to this actor: am:encrypted opens with the owner key (x25519_key.private), the copy opens with copy.recipient_private, and both give the same plaintext."
   },
   "signed_get": {
     "method": "GET",

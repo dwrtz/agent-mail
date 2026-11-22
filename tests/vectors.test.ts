@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { CipherSuite, HkdfSha256, Aes128Gcm } from '@hpke/core';
 import { DhkemX25519HkdfSha256 } from '@hpke/dhkem-x25519';
-import { b64, te, unhex, hex, unb64url, multikeyEncode, multikeyDecode } from '../src/shared/enc';
+import { b64, b64url, te, unhex, hex, unb64url, multikeyEncode, multikeyDecode } from '../src/shared/enc';
+import { decryptActivity } from '../src/shared/client';
 import { contentDigest, digestMatches } from '../src/shared/digest';
 import { signRequest, verifyRequest, signatureBase, parseSignature, POST_COMPONENTS, GET_COMPONENTS, SigError } from '../src/shared/httpsig';
 import { deriveSigningKey } from '../src/shared/keys';
@@ -100,6 +101,29 @@ describe('agent-mail vectors', () => {
     expect(s.signature).toBe(v.headers.Signature);
     const r = await verifyRequest({ method: 'GET', url: v.target_uri, headers: { 'signature-input': s['signature-input'], signature: s.signature } }, { now: created + 10, requiredComponents: GET_COMPONENTS, lookupKey: async () => unhex(v.signer_public) });
     expect(r.keyId).toBe(v.keyid);
+  });
+  it('0.2: an actor with a client key, and a Note sealed to both keys', async () => {
+    const v = V.agent_keys, B = 'https://b.example/users/bob';
+    const a = v.actor.response;
+    expect(actorDocument({ origin: 'https://b.example', handle: 'bob', name: 'Bob', readReceipts: false, sigKeys: a.assertionMethod, encKeys: a.keyAgreement, alsoEncryptTo: a['am:alsoEncryptTo'] })).toEqual(a);
+    expect(a.keyAgreement.at(-1).id).toBe(V.x25519_key.keyId);              // the owner's key stays last
+    expect(a['am:alsoEncryptTo']).toEqual([v.copy.key_id]);
+    expect('am:serverKeys' in a).toBe(false);
+    const held = v.actor_when_the_instance_holds_the_key.response;
+    expect(held).toEqual({ ...a, 'am:serverKeys': [v.copy.key_id] });
+    // The copy: same plaintext, info and aad as the hpke vector, another key.
+    expect(v.copy.aad_utf8).toBe(V.hpke.aad_utf8);
+    expect(v.copy.plaintext_utf8).toBe(V.hpke.plaintext_utf8);
+    const payload = JSON.parse(v.copy.plaintext_utf8), [noteId, rcpt] = v.copy.aad_utf8.split('\n');
+    expect(await sealNote(unhex(v.copy.recipient_public), noteId, rcpt, payload, unhex(v.copy.ikmE))).toEqual({ enc: v.copy.enc_b64url, ct: v.copy.ct_b64url });
+    // The Note opens with either key and with no other, and still validates.
+    const activity = { ...JSON.parse(V.signed_post.body_utf8), object: v.note_object };
+    expect(validateActivity(activity).type).toBe('Create');
+    const key = (keyId: string, priv: string) => ({ type: 'agent-mail-key' as const, v: 1 as const, address: 'bob@b.example', actor: B, keyId, privateKey: b64url(unhex(priv)), publicKey: b64url(x25519Public(unhex(priv))) });
+    expect(await decryptActivity([key(v.copy.key_id, v.copy.recipient_private)], activity)).toEqual(payload);
+    expect(await decryptActivity([key(V.x25519_key.keyId, V.x25519_key.private)], activity)).toEqual(payload);
+    await expect(decryptActivity([key(`${B}#enc-9`, v.copy.recipient_private)], activity)).rejects.toThrow(/no key for/);
+    expect(v.note_object['am:agent']).toBe(true);
   });
   it('picks the agent-mail-tagged member among several signatures', () => {
     const p = parseSignature('other=("@method");created=1;keyid="x", am=("@method");created=2;keyid="https://a/x";tag="agent-mail"', 'other=:AAAA:, am=:AAAA:');

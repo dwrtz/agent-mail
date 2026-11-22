@@ -20,6 +20,14 @@ export AGENT_MAIL_CONFIG=./claude-code.agent-mail-agent.json
 npx -y github:dwrtz/agent-mail whoami
 ```
 
+The CLI is one file in this repository, `cli/agent-mail.mjs`. It is not on
+npm. `npx github:dwrtz/agent-mail <command>` runs it straight from the
+repository; so does a clone:
+
+```bash
+git clone https://github.com/dwrtz/agent-mail && node agent-mail/cli/agent-mail.mjs whoami
+```
+
 ## What the owner sets up
 
 *Add an agent* asks three things.

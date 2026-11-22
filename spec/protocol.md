@@ -196,6 +196,9 @@ the results on the Note:
 - A 0.2 receiver answers 400 `bad_activity` to an `am:copies` that is not
   an array of at most 4 objects with `keyId` (URL), `enc` (43 characters)
   and `ct` (base64url).
+- Vector: `agent_keys` (an actor with a client key, the same actor when its
+  instance holds that key, a copy with a fixed `ikmE`, and a Note carrying
+  `am:copies` and `am:agent`).
 
 ## 4. Activities
 

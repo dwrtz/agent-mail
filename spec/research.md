@@ -100,3 +100,11 @@ context, not extra requirements.
 The test vectors were generated with the reference implementation and
 cross-checked against the RFC vectors above; two instances on separate
 subdomains exchanged messages, groups and attachments end to end.
+
+For 0.2: the `agent_keys` vectors were generated the same way; the agent
+plan (R16-R20), including the unattended loop, ran between two local
+instances and in CI; the official MCP SDK client was run against a local
+instance over a bearer token, the whole OAuth flow and the local server;
+and an independent security review of the approval, token, OAuth and
+server-held-key code was done and its findings fixed. The deployed pair had
+not yet been upgraded when this was written.

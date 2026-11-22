@@ -8,7 +8,7 @@ import { deriveSigningKey } from '../src/shared/keys';
 import { sealNote, openNote, x25519Public, encryptFile, HPKE_INFO, HPKE_IDS } from '../src/shared/e2ee';
 import { webfingerJrd, actorDocument, ACTIVITY_CONTEXT, ENCRYPTED_PLACEHOLDER } from '../src/shared/activity';
 
-const out: any = { about: 'agent-mail 0.1 test vectors. Byte strings are hex unless the field name ends in _b64url or the value is a header. All JSON bodies are the exact bytes sent (UTF-8, no trailing newline).' };
+const out: any = { about: 'agent-mail 0.1 test vectors, with the spec 0.2 additions under agent_keys. Byte strings are hex unless the field name ends in _b64url or the value is a header. All JSON bodies are the exact bytes sent (UTF-8, no trailing newline).' };
 const seed = b64url(Uint8Array.from({ length: 32 }, (_, i) => i));
 const alice = deriveSigningKey(seed, 'alice', 1);
 out.signing_key_derivation = {
@@ -84,6 +84,31 @@ out.signed_post = {
 };
 // Signed GET for the attachment, as bob
 const bobSig = deriveSigningKey(seed, 'bob', 1);
+// Spec 0.2: bob gave an agent its own key (#enc-2). His actor names it, and alice seals a copy of the same message to it.
+const agentSk = await sha256('agent-mail test vector: bob agent x25519');
+const agentPk = x25519Public(agentSk);
+const ikmE2 = await sha256('agent-mail test vector: ephemeral for the copy');
+const copy = await sealNote(agentPk, noteId, B, payload, ikmE2);
+if (JSON.stringify(await openNote(agentSk, noteId, B, copy)) !== JSON.stringify(payload)) throw new Error('copy roundtrip');
+const bobKeys = {
+  sigKeys: [{ id: `${B}#sig-1`, type: 'Multikey' as const, controller: B, publicKeyMultibase: multikeyEncode('ed25519', bobSig.publicKey) }],
+  encKeys: [{ id: `${B}#enc-2`, type: 'Multikey' as const, controller: B, publicKeyMultibase: multikeyEncode('x25519', agentPk) },
+            { id: `${B}#enc-1`, type: 'Multikey' as const, controller: B, publicKeyMultibase: multikeyEncode('x25519', bobPk) }],
+};
+const bobActor = (serverKeys?: string[]) => actorDocument({ origin: 'https://b.example', handle: 'bob', name: 'Bob', readReceipts: false, ...bobKeys, alsoEncryptTo: [`${B}#enc-2`], serverKeys });
+out.agent_keys = {
+  note: 'Spec 0.2, optional on the wire. A 0.1 instance ignores am:alsoEncryptTo, am:serverKeys, am:copies and am:agent and interoperates unchanged.',
+  actor: { request: 'GET https://b.example/users/bob', content_type: 'application/activity+json', response: bobActor(),
+    expected: 'The client key #enc-2 is listed before the owner key, so the last keyAgreement entry is still #enc-1. A sender seals am:encrypted to #enc-1 and one copy to #enc-2.' },
+  actor_when_the_instance_holds_the_key: { response: bobActor([`${B}#enc-2`]), expected: 'Same actor, with am:serverKeys naming the client key whose private half the instance holds (the owner opted in). Senders treat the key as any other client key.' },
+  copy: {
+    key_id: `${B}#enc-2`, recipient_private: hex(agentSk), recipient_public: hex(agentPk), ikmE: hex(ikmE2),
+    info_utf8: HPKE_INFO, aad_utf8: `${noteId}\n${B}`, plaintext_utf8: JSON.stringify(payload), enc_b64url: copy.enc, ct_b64url: copy.ct,
+    expected: 'The same plaintext, info and aad as the hpke vector, sealed to the client key. Opening enc/ct with recipient_private gives plaintext_utf8.',
+  },
+  note_object: { ...create.object, 'am:copies': [{ keyId: `${B}#enc-2`, enc: copy.enc, ct: copy.ct }], 'am:agent': true },
+  note_expected: 'The Note of the signed_post vector as an agent of alice would send it to this actor: am:encrypted opens with the owner key (x25519_key.private), the copy opens with copy.recipient_private, and both give the same plaintext.',
+};
 const g = signRequest({ method: 'GET', url: attUrl, headers: {} }, { keyId: `${B}#sig-1`, privateKey: bobSig.privateKey, created, nonce: 'bm9uY2UtMDAwMDAwMDAwMDAy' });
 out.signed_get = { method: 'GET', target_uri: attUrl, headers: { 'Signature-Input': g['signature-input'], Signature: g.signature }, signer_private_seed: hex(bobSig.privateKey), signer_public: hex(bobSig.publicKey), keyid: `${B}#sig-1`, signature_base: g.base,
   expected: 'Valid at created+10 s with the public key above; the response is stored_bytes with Content-Digest equal to attachment.digest.' };

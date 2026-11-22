@@ -363,9 +363,10 @@ id) and, if the owner ticked it, the owner's key. Downloaded as
 ## CLI and local MCP server (`cli/agent-mail.mjs`)
 
 Node 20+, one file, bundled by `npm run build:cli` from `cli/src/bin.ts`
-(the bundle is committed; CI checks it matches its source). The root
-`package.json` names it as `bin`, so `npx github:<owner>/<repo> <command>`
-runs it; `cli/package.json` publishes the same file to npm.
+(the bundle is committed; CI checks it matches its source). It is not
+published to a registry: clone the repository and run
+`node cli/agent-mail.mjs <command>`, or, since the root `package.json`
+names it as `bin`, `npx github:<owner>/<repo> <command>`.
 
 Settings from the environment: `AGENT_MAIL_CONFIG` (an agent file: a path,
 or the JSON itself), or `AGENT_MAIL_URL`, `AGENT_MAIL_TOKEN` and
@@ -552,6 +553,10 @@ also serves:
   `client_id` is its own URL.
 
 ## Deploy notes from the reference deployment
+
+These notes are from the 0.1 deployment. The 0.2 additions were checked on
+two local instances and in CI; at the time of writing they had not yet been
+run on the deployed pair.
 
 - Two Workers in the same zone with Custom Domains reach each other with
   plain `fetch` (no 522 or loop errors); the live suite passed on that

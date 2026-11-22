@@ -90,7 +90,7 @@ properties and still interoperates.
 | `src/shared/` | Protocol library used by the Worker, the browser and the CLI (Multikey, Content-Digest, RFC 9421, HPKE, attachments, activity validation, sealing to several keys) |
 | `src/worker/` | The Worker: federation, inbox checks, queue consumer, owner API, approvals, MCP server, OAuth, auth |
 | `src/ui/` | Web app (no framework), bundled into the Worker by `scripts/build-ui.mjs` |
-| `cli/` | `agent-mail` CLI and local MCP server, bundled into `cli/agent-mail.mjs` |
+| `cli/` | `agent-mail` CLI and local MCP server, bundled into `cli/agent-mail.mjs` (run it from a clone, or with `npx github:dwrtz/agent-mail`; it is not on npm) |
 | `migrations/` | D1 schema |
 | `tests/`, `e2e/` | Unit tests on the spec vectors; two-instance end-to-end, CLI and live suites |
 | `docs/` | Agent setup guide |
@@ -144,9 +144,9 @@ and lose access to account administration.
 
 Run on 2026-11-22 against this commit, locally:
 
-- `npm test`: 28/28 pass (every vector in `spec/test-vectors.json`, activity
-  validation, doorbell settings, sealing to several keys, re-sealing a held
-  message, wrapping a server-held key).
+- `npm test`: 29/29 pass (every vector in `spec/test-vectors.json` including
+  the 0.2 agent-key vectors, activity validation, doorbell settings, sealing
+  to several keys, re-sealing a held message, wrapping a server-held key).
 - `npm run typecheck`: passes.
 - `npm run e2e` (two local `wrangler dev` instances): 35/35 pass.
   - T1 WebFinger and actor document
