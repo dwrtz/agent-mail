@@ -1,7 +1,11 @@
 {
   "name": "agent-mail",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "agent-mail": "cli/agent-mail.mjs"
+  },
   "scripts": {
     "build": "node scripts/build-ui.mjs",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
@@ -10,7 +14,7 @@
     "e2e": "esbuild e2e/e2e.ts --bundle --platform=node --format=esm --target=node20 --outfile=.e2e/e2e.mjs --external:playwright --log-level=warning && node .e2e/e2e.mjs",
     "typecheck": "node scripts/build-ui.mjs && tsc -p tsconfig.json && tsc -p tsconfig.ui.json && tsc -p tsconfig.node.json",
     "deploy": "npm run build && wrangler deploy",
-    "build:cli": "esbuild cli/src/cli.ts --bundle --platform=node --format=esm --target=node20 --outfile=cli/agent-mail.mjs --banner:js=\"#!/usr/bin/env node\"",
+    "build:cli": "esbuild cli/src/bin.ts --bundle --platform=node --format=esm --target=node20 --outfile=cli/agent-mail.mjs --banner:js=\"#!/usr/bin/env node\"",
     "e2e:live": "esbuild e2e/live.ts --bundle --platform=node --format=esm --target=node20 --outfile=.e2e/live.mjs --external:playwright --log-level=warning && node .e2e/live.mjs",
     "e2e:cli": "esbuild e2e/cli-smoke.ts --bundle --platform=node --format=esm --target=node20 --outfile=.e2e/cli-smoke.mjs --external:playwright --log-level=warning && node .e2e/cli-smoke.mjs"
   },

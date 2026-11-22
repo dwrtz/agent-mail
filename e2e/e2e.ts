@@ -4,6 +4,7 @@ import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { Account, Probe, waitFor } from './lib';
 import { runSuite } from './suite';
+import { runAgentSuite } from './agents';
 import { runUi } from './ui';
 import { multikeyEncode, randomBytes } from '../src/shared/enc';
 
@@ -34,7 +35,9 @@ async function main() {
   await B.signup('bob@example.com', 'correct horse battery', 'bob', 'Bob');
   await C.signup('carol@example.com', 'correct horse battery', 'carol', 'Carol');
   for (const x of [A, B, C]) await x.setupKey();
-  const results = await runSuite({ A, B, C, probe: new Probe(B_URL, probeKey), sinkBase: B_URL, log: s => console.log(s) });
+  const ctx = { A, B, C, probe: new Probe(B_URL, probeKey), sinkBase: B_URL, log: (s: string) => console.log(s) };
+  const results = await runSuite(ctx);
+  results.push(...await runAgentSuite(ctx));
   try {
     const D = new Account(B_URL); await D.signup('dave@example.com', 'correct horse battery', 'dave', 'Dave'); await D.setupKey();
     const E = new Account(B_URL); await E.signup('erin@example.com', 'correct horse battery', 'erin', 'Erin'); await E.setupKey();

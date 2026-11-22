@@ -11,6 +11,7 @@ export class Account {
   me: any;
   keys: KeyFile[] = [];
   token = '';
+  tokenId = 0;
   mcp!: McpClient;
   constructor(public base: string) {}
   get actor() { return this.me.actor as string; }
@@ -43,10 +44,19 @@ export class Account {
     this.me = (await this.api('/api/me')).user;
     return k;
   }
-  async connect() {
-    this.token = (await this.api('/api/tokens', { body: { label: 'e2e' } })).token;
+  /** Makes a connector token and an MCP session with it. By default the token asks the owner about nothing. */
+  async connect(o: { label?: string; scopes?: string[]; ask?: string[] } = {}) {
+    const t = await this.api('/api/tokens', { body: { label: o.label ?? 'e2e', scopes: o.scopes, ask: o.ask ?? [] } });
+    this.token = t.token; this.tokenId = t.id;
     this.mcp = new McpClient(`${this.base}/mcp`, this.token);
     await this.mcp.init();
+  }
+  /** A second, separate agent on the same account. */
+  async agent(o: { label?: string; scopes?: string[]; ask?: string[] } = {}) {
+    const t = await this.api('/api/tokens', { body: { label: o.label ?? 'agent', scopes: o.scopes, ask: o.ask ?? [] } });
+    const mcp = new McpClient(`${this.base}/mcp`, t.token);
+    await mcp.init();
+    return { id: t.id as number, token: t.token as string, mcp, transport: { prepare: (a: any) => mcp.tool('prepare_message', a), upload: (b: Uint8Array) => this.api('/api/attachments', { raw: b }), send: (b: unknown) => mcp.tool('send_message', b) } as Transport };
   }
   apiTransport(): Transport {
     return { prepare: a => this.api('/api/outbox/prepare', { body: a }), upload: b => this.api('/api/attachments', { raw: b }), send: b => this.api(`/users/${this.me.handle}/outbox`, { body: b }) };

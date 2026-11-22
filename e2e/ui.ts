@@ -16,7 +16,8 @@ export interface UiOpts {
 export async function runUi(o: UiOpts) {
   const log = o.log ?? console.log;
   mkdirSync(o.shots, { recursive: true });
-  const browser = await chromium.launch();
+  // E2E_CHROMIUM points at a Chromium binary when the one Playwright expects is not installed.
+  const browser = await chromium.launch(process.env.E2E_CHROMIUM ? { executablePath: process.env.E2E_CHROMIUM } : {});
   const steps: { name: string; pass: boolean; detail: string }[] = [];
   const step = async (name: string, fn: () => Promise<void>) => {
     try { await fn(); steps.push({ name, pass: true, detail: '' }); log(`PASS UI ${name}`); }

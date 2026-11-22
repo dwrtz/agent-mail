@@ -1,5 +1,5 @@
 // Accounts, sessions and connector tokens (R2, R12).
-import { Env, HttpError, nowIso, isoIn, UserRow, origin } from './env';
+import { Env, HttpError, nowIso, isoIn, UserRow, origin, Caller, TokenInfo, SCOPES, ASKS, DEFAULT_ASK, Scope, Ask, pick } from './env';
 import { b64url, hex, randomBytes, sha256, te, unb64url } from '../shared/enc';
 import { HANDLE_RE } from '../shared/activity';
 
@@ -60,16 +60,23 @@ export async function logout(env: Env, req: Request) {
 
 const readCookie = (req: Request) => /(?:^|;\s*)am_session=([A-Za-z0-9_-]+)/.exec(req.headers.get('cookie') ?? '')?.[1] ?? null;
 
-/** Returns the signed-in user (session cookie or bearer token), and how. */
-export async function authenticate(env: Env, req: Request): Promise<{ user: UserRow; via: 'session' | 'token' } | null> {
+interface TokenRow { id: number; user_id: number; label: string; kind: 'token' | 'oauth'; scopes: string; ask: string }
+const tokenInfo = (t: TokenRow): TokenInfo => ({ id: t.id, label: t.label, kind: t.kind, scopes: pick(t.scopes, SCOPES), ask: pick(t.ask, ASKS) });
+
+/** Returns who is calling: an agent (bearer connector token or OAuth access token) or the owner (session cookie). */
+export async function authenticate(env: Env, req: Request): Promise<Caller | null> {
   const auth = req.headers.get('authorization');
   if (auth?.startsWith('Bearer ')) {
     const h = hex(await sha256(auth.slice(7).trim()));
-    const t = await env.DB.prepare('SELECT user_id FROM api_tokens WHERE token_hash = ?').bind(h).first<{ user_id: number }>();
+    let t = await env.DB.prepare("SELECT id, user_id, label, kind, scopes, ask FROM api_tokens WHERE token_hash = ? AND kind = 'token'").bind(h).first<TokenRow>();
+    if (!t) {
+      t = await env.DB.prepare(`SELECT t.id, t.user_id, t.label, t.kind, t.scopes, t.ask FROM oauth_tokens o JOIN api_tokens t ON t.id = o.token_id
+          WHERE o.access_hash = ? AND o.access_expires_at > ?`).bind(h, nowIso()).first<TokenRow>();
+    }
     if (!t) return null;
-    await env.DB.prepare('UPDATE api_tokens SET last_used_at = ? WHERE token_hash = ?').bind(nowIso(), h).run();
+    await env.DB.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?').bind(nowIso(), t.id).run();
     const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(t.user_id).first<UserRow>();
-    return user && allowedEmail(env, user.email) ? { user, via: 'token' } : null;
+    return user && allowedEmail(env, user.email) ? { user, via: 'token', token: tokenInfo(t) } : null;
   }
   const c = readCookie(req);
   if (!c) return null;
@@ -79,8 +86,32 @@ export async function authenticate(env: Env, req: Request): Promise<{ user: User
   return user && allowedEmail(env, user.email) ? { user, via: 'session' } : null;
 }
 
-export async function createToken(env: Env, userId: number, label: string) {
-  const token = 'am_' + b64url(randomBytes(32));
-  await env.DB.prepare('INSERT INTO api_tokens (user_id, label, token_hash, created_at) VALUES (?, ?, ?, ?)').bind(userId, (label || 'connector').slice(0, 60), hex(await sha256(token)), nowIso()).run();
-  return token;
+export interface NewToken { label?: string; scopes?: unknown; ask?: unknown; kind?: 'token' | 'oauth'; clientId?: string }
+/** Makes a connector token (or, for OAuth, the grant row behind its access tokens). A new agent starts at the end of the queue. */
+export async function createToken(env: Env, userId: number, o: NewToken = {}) {
+  const scopes: Scope[] = o.scopes === undefined ? [...SCOPES] : pick(o.scopes, SCOPES);
+  if (!scopes.length) throw new HttpError(400, 'bad_request', `scopes must include at least one of ${SCOPES.join(', ')}`);
+  const ask: Ask[] = o.ask === undefined ? DEFAULT_ASK : pick(o.ask, ASKS);
+  const kind = o.kind ?? 'token';
+  // An OAuth grant has no token of its own: its row gets a value no bearer can hash to.
+  const token = kind === 'token' ? 'am_' + b64url(randomBytes(32)) : null;
+  const row = await env.DB.prepare('INSERT INTO api_tokens (user_id, label, token_hash, created_at, scopes, ask, kind, client_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
+    .bind(userId, (o.label || (kind === 'oauth' ? 'connector' : 'agent')).slice(0, 60), token ? hex(await sha256(token)) : `oauth:${b64url(randomBytes(18))}`, nowIso(), scopes.join(' '), ask.join(' '), kind, o.clientId ?? null).first<{ id: number }>();
+  await env.DB.prepare('INSERT OR REPLACE INTO consumers (user_id, consumer, upto) VALUES (?, ?, (SELECT COALESCE(MAX(cursor), 0) FROM inbox_queue WHERE user_id = ?))')
+    .bind(userId, `token:${row!.id}`, userId).run();
+  return { id: row!.id, token, scopes, ask };
+}
+
+/** Revokes a token and everything that hangs off it: OAuth tokens, its client key, its queue position, its pending approvals. */
+export async function revokeToken(env: Env, userId: number, id: number) {
+  const t = await env.DB.prepare('SELECT id FROM api_tokens WHERE id = ? AND user_id = ?').bind(id, userId).first();
+  if (!t) return;
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM api_tokens WHERE id = ?').bind(id),
+    env.DB.prepare('DELETE FROM oauth_tokens WHERE token_id = ?').bind(id),
+    env.DB.prepare("DELETE FROM enc_keys WHERE user_id = ? AND kind = 'client' AND token_id = ?").bind(userId, id),
+    env.DB.prepare('DELETE FROM consumers WHERE user_id = ? AND consumer = ?').bind(userId, `token:${id}`),
+    env.DB.prepare('DELETE FROM consumer_acks WHERE user_id = ? AND consumer = ?').bind(userId, `token:${id}`),
+    env.DB.prepare("UPDATE approvals SET status = 'cancelled', decided_at = ? WHERE user_id = ? AND token_id = ? AND status = 'pending'").bind(nowIso(), userId, id),
+  ]);
 }

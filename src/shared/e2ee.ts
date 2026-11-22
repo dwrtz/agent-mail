@@ -44,6 +44,8 @@ export interface NotePayload {
   summary: string | null;
   content: string;
   attachments: { url: string; name: string; mediaType: string; size: number; key: string; iv: string }[];
+  /** Set by an agent's client when it, not the owner, wrote the message. Inside the ciphertext: only the recipient sees it. */
+  agent?: { name: string };
 }
 
 export async function sealNote(recipientPublic: Uint8Array, noteId: string, recipientActor: string, payload: NotePayload, ikmE?: Uint8Array) {
