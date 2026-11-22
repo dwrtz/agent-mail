@@ -43,7 +43,13 @@ button.link { border: 0; background: none; color: var(--accent); padding: 0 4px;
 table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 18px; }
 th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); word-break: break-all; } th { font-size: 13px; color: var(--muted); font-weight: 500; }
 .token { display: block; word-break: break-all; background: #fff; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
-.request header { display: flex; justify-content: space-between; }
+.request header, .approval header { display: flex; justify-content: space-between; }
+.tag.agent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, white); }
+.checks { border: 1px solid var(--border); border-radius: 8px; margin: 0 0 12px; padding: 8px 12px 2px; } .checks legend { font-weight: 500; padding: 0 4px; }
+.checks label { font-weight: 400; margin: 0 0 6px; } .checks .switch { align-items: baseline; }
+.agents { list-style: none; padding: 0; margin: 0 0 14px; } .agent { padding: 8px 0; border-bottom: 1px solid var(--border); } .agent .link { margin-left: 8px; }
+.msg.preview { max-width: none; background: #f9fafb; } .approval .row { margin-top: 10px; }
+.consent { max-width: 460px; } textarea { width: 100%; }
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; align-content: start; }
   .layout, main, .thread, .thread > *, .row { min-width: 0; max-width: 100%; }

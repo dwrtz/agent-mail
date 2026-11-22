@@ -5,6 +5,8 @@ import { chromium, Page } from 'playwright';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { Account, waitFor } from './lib';
 import { KeyFile } from '../src/shared/client';
+import { main as cli } from '../cli/src/cli';
+import { b64url, randomBytes, sha256 } from '../src/shared/enc';
 
 export interface UiOpts {
   A: { base: string; email: string; password: string; handle: string; name: string; signup: boolean };
@@ -111,13 +113,59 @@ export async function runUi(o: UiOpts) {
       await waitFor('group delivered', async () => { await a.reload(); return (await a.locator('.msg.out footer').first().textContent())?.includes('Delivered'); }, 40000);
       await shot(a, 'group');
     });
-    await step('Settings and Contacts', async () => {
+    let agentFile: any = null;
+    await step('Settings: add an agent with its own key', async () => {
       await a.getByRole('link', { name: 'Settings' }).click();
-      await a.getByLabel('Token label').fill('Grok Bot');
-      await a.getByRole('button', { name: 'Create token' }).click();
+      await a.getByLabel('Agent name').fill('Claude Code');
+      await a.getByRole('button', { name: 'Add agent' }).click();
       await a.locator('code.token').waitFor();
+      const dl = a.waitForEvent('download');
+      await a.getByRole('button', { name: 'Download agent file' }).click();
+      agentFile = JSON.parse(readFileSync(await (await dl).path(), 'utf8'));
+      if (agentFile?.type !== 'agent-mail-agent' || agentFile.keys.length !== 1 || !String(agentFile.token).startsWith('am_') || agentFile.url !== o.A.base) throw new Error('agent file not as expected');
+      if (agentFile.keys[0].keyId === keyA!.keyId) throw new Error('the agent must get its own key, not the owner\'s');
       await a.locator('code.token').evaluate(el => { el.textContent = 'am_••••••••••••••••••••••••••••••••'; });
       await shot(a, 'settings');
+    });
+    await step('An agent asks before a sensitive message; the owner reads it and approves', async () => {
+      const env = { AGENT_MAIL_CONFIG: JSON.stringify(agentFile) };
+      const held = await cli(['send', '--to', o.B.address, '--subject', 'Contract', '--sensitive', 'We accept the offer. I will sign on Friday.'], env, () => {});
+      if (held.status !== 'pending_approval' || held.reason !== 'agent_flagged') throw new Error(`expected a held message: ${JSON.stringify(held)}`);
+      await a.getByRole('link', { name: /Approvals/ }).click();
+      await a.getByText('We accept the offer. I will sign on Friday.').waitFor();
+      await a.getByText('The agent marked this message as sensitive.').waitFor();
+      await shot(a, 'approvals');
+      await a.getByRole('button', { name: 'Approve' }).click();
+      await a.getByText('Nothing is waiting for you.').waitFor();
+      await waitFor('approved message at B', async () => (await o.B.api('/api/queue?limit=100')).items.find((x: any) => x.noteId === held.noteId), 40000);
+      await a.goto(`${o.A.base}/thread?uri=${encodeURIComponent(held.threadId)}`);
+      await a.locator('.tag.agent').first().waitFor();
+      if (!(await a.locator('.tag.agent').first().textContent())?.includes('Claude Code')) throw new Error('the agent tag should name the agent');
+    });
+    await step('An app connects with OAuth: consent screen, then a working token', async () => {
+      const reg: any = await (await fetch(`${o.A.base}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Example Assistant', redirect_uris: ['http://localhost:9/callback'] }) })).json();
+      const verifier = b64url(randomBytes(32)), challenge = b64url(await sha256(verifier));
+      const q = new URLSearchParams({ response_type: 'code', client_id: reg.client_id, redirect_uri: 'http://localhost:9/callback', code_challenge: challenge, code_challenge_method: 'S256', state: 'ui' });
+      await a.goto(`${o.A.base}/oauth/authorize?${q}`);
+      await a.getByText('Example Assistant').waitFor();
+      await shot(a, 'consent');
+      const back = a.waitForRequest(r => r.url().startsWith('http://localhost:9/callback'));
+      await a.getByRole('button', { name: 'Allow' }).click();
+      const code = new URL((await back).url()).searchParams.get('code');
+      if (!code) throw new Error('no code on the redirect');
+      const tk: any = await (await fetch(`${o.A.base}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: reg.client_id }) })).json();
+      if (!tk.access_token || tk.scope !== 'read send') throw new Error(`token: ${JSON.stringify(tk)}`);
+      // Signed out, the same link asks to sign in and then comes back to the consent screen.
+      const fresh = await (await browser.newContext({ viewport: { width: 1200, height: 760 } })).newPage();
+      await fresh.goto(`${o.A.base}/oauth/authorize?${q}`);
+      await fresh.getByLabel('Email').fill(o.A.email); await fresh.getByLabel('Password').fill(o.A.password);
+      await fresh.getByRole('button', { name: 'Sign in' }).click();
+      await fresh.getByText('Example Assistant').waitFor();
+      await fresh.context().close();
+      await a.goto(`${o.A.base}/settings`);
+      await a.getByText('connected app').waitFor();
+    });
+    await step('Contacts and mobile', async () => {
       await a.getByRole('link', { name: 'Contacts' }).click();
       await a.locator('table').waitFor();
       await shot(a, 'contacts');
