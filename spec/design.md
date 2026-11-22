@@ -238,7 +238,7 @@ name = the owner, or a token with that scope (else 403
 | POST /api/auth/signup | (no auth) | `{email,password,handle,name}` | `{ok:true}` + cookie |
 | POST /api/auth/login | (no auth) | `{email,password}` | `{ok:true}` + cookie |
 | POST /api/auth/logout | | | `{}` |
-| GET /api/me | any | | `{user:{handle,name,email,actor,address,readReceipts,encKeys:[{n,keyId,publicKey}],clientKeys:[{n,keyId,publicKey,label,tokenId}],doorbell:{url,header,valueSet,extra:[names]},unread,requests,latestCursor,unreadMessages,approvals}}`; for a token: no `email`, no `doorbell`, `clientKeys` without `label` and `tokenId`, and `token:{label,scopes,ask}` |
+| GET /api/me | any | | `{user:{handle,name,email,actor,address,readReceipts,encKeys:[{n,keyId,publicKey}],clientKeys:[{n,keyId,publicKey,label,tokenId,serverKey}],doorbell:{url,header,valueSet,extra:[names]},unread,requests,latestCursor,unreadMessages,approvals}}`; for a token: no `email`, no `doorbell`, `clientKeys` with only `n`, `keyId` and `publicKey`, and `token:{label,scopes,ask,serverKey}` |
 | PUT /api/keys/encryption | owner | `{publicKey}` (base64url raw X25519) | `{keyId}`; same key twice is a no-op |
 | DELETE /api/keys/encryption/:n | owner | | `{}` (cannot delete the only key or the newest key) |
 | PUT /api/keys/client | owner | `{publicKey,label?,tokenId?}` | `{keyId,n}`; at most 4 (400 `too_many_keys`) |
