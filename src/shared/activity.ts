@@ -12,6 +12,7 @@ export const ACTOR_CONTEXT = [
 ];
 export const MAX_GROUP = 50;          // members including the creator
 export const MAX_ATTACHMENTS = 10;
+export const MAX_CLIENT_KEYS = 4;      // extra keys per actor that senders also encrypt to (am:alsoEncryptTo)
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_INBOX_BODY = 256 * 1024;
 export const ENCRYPTED_PLACEHOLDER = 'This message is end-to-end encrypted.';
@@ -27,7 +28,7 @@ export function webfingerJrd(handle: string, host: string, actorId: string) {
 
 export interface KeyEntry { id: string; type: 'Multikey'; controller: string; publicKeyMultibase: string }
 
-export function actorDocument(o: { origin: string; handle: string; name: string; sigKeys: KeyEntry[]; encKeys: KeyEntry[]; readReceipts: boolean }) {
+export function actorDocument(o: { origin: string; handle: string; name: string; sigKeys: KeyEntry[]; encKeys: KeyEntry[]; readReceipts: boolean; alsoEncryptTo?: string[]; serverKeys?: string[] }) {
   const id = `${o.origin}/users/${o.handle}`;
   return {
     '@context': ACTOR_CONTEXT,
@@ -41,6 +42,9 @@ export function actorDocument(o: { origin: string; handle: string; name: string;
     keyAgreement: o.encKeys,
     'am:protocol': PROTOCOL,
     'am:readReceipts': o.readReceipts,
+    ...(o.alsoEncryptTo?.length ? { 'am:alsoEncryptTo': o.alsoEncryptTo } : {}),
+    // Said openly: the instance itself holds these keys (the owner opted in), so it can read what is sealed to them.
+    ...(o.serverKeys?.length ? { 'am:serverKeys': o.serverKeys } : {}),
   };
 }
 
@@ -95,6 +99,12 @@ export function validateActivity(a: any): Inbound {
     if (!isUrl(e.recipient) || !isUrl(e.keyId)) throw bad('am:encrypted.recipient and keyId must be URLs');
     if (!isB64u(e.enc, 43, 43)) throw bad('am:encrypted.enc must be 32 bytes base64url');
     if (!isB64u(e.ct, 22, 200_000)) throw bad('am:encrypted.ct must be base64url');
+    // Optional: the same plaintext sealed to the recipient's other keys (their agents' client keys).
+    const copies = n['am:copies'];
+    if (copies !== undefined) {
+      if (!Array.isArray(copies) || copies.length > MAX_CLIENT_KEYS) throw bad(`am:copies must be an array of at most ${MAX_CLIENT_KEYS}`);
+      for (const c of copies) if (!c || typeof c !== 'object' || !isUrl(c.keyId) || !isB64u(c.enc, 43, 43) || !isB64u(c.ct, 22, 200_000)) throw bad('am:copies entries need keyId, enc and ct');
+    }
     const att = n.attachment ?? [];
     if (!Array.isArray(att) || att.length > MAX_ATTACHMENTS) throw bad(`attachment must be an array of at most ${MAX_ATTACHMENTS}`);
     for (const x of att) {

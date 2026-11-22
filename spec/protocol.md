@@ -4,6 +4,12 @@ This file is normative. Every instance built from this spec must produce and
 accept exactly these shapes, so that separate builds interoperate.
 `test-vectors.json` has worked examples of each; a build passes them all.
 
+The protocol id on the wire is still `agent-mail/0.1`. Spec version 0.2 adds
+three optional properties, marked **(0.2)** below: `am:alsoEncryptTo` on
+actors, `am:copies` and `am:agent` on Notes. A 0.1 instance ignores them
+(unknown properties are ignored) and interoperates unchanged; a 0.2 instance
+must accept messages without them.
+
 Documents are JSON in ActivityStreams 2.0 compact form. Consumers read the
 properties as written here; no JSON-LD expansion is needed or done. Unknown
 properties are ignored. URLs are `https`. (A test-only var allows
@@ -54,12 +60,37 @@ Access-Control-Allow-Origin: *
 }
 ```
 
+**(0.2)** An actor whose owner gave agents their own keys also has
+
+```json
+  "keyAgreement": [{"id": "https://a.example/users/alice#enc-2", "type": "Multikey", "controller": "...", "publicKeyMultibase": "z6LS..."},
+                   {"id": "https://a.example/users/alice#enc-1", "type": "Multikey", "controller": "...", "publicKeyMultibase": "z6LS..."}],
+  "am:alsoEncryptTo": ["https://a.example/users/alice#enc-2"]
+```
+
+`am:alsoEncryptTo` lists up to 4 ids of entries in `keyAgreement`: the
+*client keys*. They come first in `keyAgreement`, so the last entry is
+always the owner's newest key. The property is absent when there are none.
+
+**(0.2)** `"am:serverKeys": ["https://a.example/users/alice#enc-3"]` names
+those client keys whose private half the actor's own instance holds,
+because the owner opted a hosted connector in to that (spec R20). It is a
+statement to correspondents: what is sealed to those keys can be read by
+that instance. Senders treat such a key like any other client key. The
+property is absent when there are none, and an instance that never holds
+encryption keys never emits it.
+
 - `assertionMethod`: Ed25519 signing keys (FEP-521a style). Multikey:
   `"z"` + base58btc(`0xed 0x01` + 32-byte public key).
 - `keyAgreement`: X25519 HPKE keys. Multikey: `"z"` + base58btc(`0xec 0x01`
   + 32-byte public key). Senders use the **last** entry. Empty until the
-  user sets up encryption.
-- Key ids are `<actor>#sig-<n>` and `<actor>#enc-<n>`.
+  user sets up encryption. **(0.2)** Senders also seal a copy to each key
+  named in `am:alsoEncryptTo` (section 3.2), ignoring ids that are not in
+  `keyAgreement`, are not X25519, or name the last entry; at most the first
+  4. Senders should not rely on an actor document older than 15 seconds
+  when choosing keys.
+- Key ids are `<actor>#sig-<n>` and `<actor>#enc-<n>`. An id names one key
+  for ever: `n` is never reused after a key is removed.
 - Every key's `controller` equals the actor `id`.
 - `GET /users/<handle>/outbox` returns an empty `OrderedCollection`
   (`{"@context":"https://www.w3.org/ns/activitystreams","id":"<outbox>","type":"OrderedCollection","totalItems":0,"orderedItems":[]}`);
@@ -122,7 +153,9 @@ Signature: am=:<base64 Ed25519 signature over the signature base>:
 
 `summary` (subject) may be null. `content` is plain text, at most 65,536
 characters. `attachments[].size` is the plaintext size; one entry per
-`attachment` on the Note, matched by `url`.
+`attachment` on the Note, matched by `url`. **(0.2)** An optional
+`"agent": {"name": "<up to 80 characters>"}` says which agent wrote the
+message; readers that do not know it ignore it.
 
 - Vector: `hpke` (with a fixed `ikmE` so the output is reproducible) and
   RFC 9180 A.1.1 under `rfc_vectors`.
@@ -133,6 +166,39 @@ AES-256-GCM, a fresh random 32-byte key and 12-byte IV per file, no AAD.
 Stored bytes = ciphertext followed by the 16-byte tag. The Note's
 `am:size` and `am:digest` describe the stored bytes, so the fetcher checks
 them before decrypting. Vector: `attachment`.
+
+### 3.2 Copies for client keys (0.2)
+
+For each key the recipient names in `am:alsoEncryptTo`, the sender seals
+the **same plaintext** again, single-shot, with the same suite, the same
+`info` and the same `aad` (`<Note id>\n<recipient actor id>`), and lists
+the results on the Note:
+
+```json
+"am:copies": [{"keyId": "https://b.example/users/bob#enc-2", "enc": "<base64url 32 bytes>", "ct": "<base64url>"}]
+```
+
+- At most 4 entries. `am:encrypted` is unchanged and is always sealed to
+  the recipient's last `keyAgreement` key, so a 0.1 receiver loses nothing.
+- A receiver opens whichever block (`am:encrypted` or a copy) was sealed to
+  a key it holds. The `aad` uses `am:encrypted.recipient` for every block.
+- A sender does the same for its own stored copy with its own client keys.
+- Each copy repeats the ciphertext. The whole activity must still fit the
+  receiver's 262,144-byte inbox limit; a sender refuses a message that
+  would not (413 `too_large` to its own client) rather than drop copies.
+- Nothing proves that the blocks of one Note hold the same plaintext: only
+  a holder of several of the keys could compare them. A sender can
+  therefore show an owner and that owner's agent different text. Clients
+  treat message text as untrusted input either way, and a client that
+  re-sends a message on someone's say-so (an owner approving what an agent
+  wrote) seals the plaintext it actually showed, never a ciphertext it was
+  handed.
+- A 0.2 receiver answers 400 `bad_activity` to an `am:copies` that is not
+  an array of at most 4 objects with `keyId` (URL), `enc` (43 characters)
+  and `ct` (base64url).
+- Vector: `agent_keys` (an actor with a client key, the same actor when its
+  instance holds that key, a copy with a fixed `ikmE`, and a Note carrying
+  `am:copies` and `am:agent`).
 
 ## 4. Activities
 
@@ -180,7 +246,12 @@ only `am:encrypted` differs.
   shows something sensible). The real text is only in `am:encrypted`.
 - `context` is the thread id. `inReplyTo` is the Note answered, or null.
 - `am:seq` counts this actor's activities (Create, Add, Remove) in this
-  thread, from 1.
+  thread, from 1. It is not covered by the encryption, so an instance
+  assigns it when the activity is actually sent.
+- **(0.2)** `"am:copies"`: section 3.2. Optional.
+- **(0.2)** `"am:agent": true` when the message was sent with an agent's
+  token rather than by the owner. It is a statement by the sending
+  instance; absent otherwise. Receivers show it and never act on it.
 - `attachment` is optional (at most 10). Attachment URLs are on the
   actor's origin. `mediaType` on the wire is always
   `application/octet-stream`; the real type is inside the ciphertext.
@@ -247,4 +318,6 @@ Body: `{"error":"<code>","detail":"<human text>"}`, `Content-Type: application/j
 {"type":"agent-mail.doorbell","handle":"david@agent.example.com","unread":3,"requests":1,"at":"2026-11-17T02:00:05.000Z"}
 ```
 
-Nothing else. The header named in settings carries the configured value.
+Nothing else. The header named in settings carries the configured value,
+and any extra headers the owner configured are sent with it. `unread` is
+the largest number of unacked items any of the owner's agents has waiting.

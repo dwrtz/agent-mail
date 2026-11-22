@@ -1,11 +1,11 @@
 // Discovery, actor fetching, the inbox (R4, R6-R9, R11) and signed attachment GETs (R10).
 import { Env, HttpError, json, nowIso, isoIn, origin, host, actorUrl, userByHandle, UserRow, parseJson } from './env';
 import { buildActor, signingKey } from './keys';
-import { webfingerJrd, validateActivity, isUrl, ProtoError, MAX_INBOX_BODY, threadCreator, Inbound, MAX_GROUP } from '../shared/activity';
+import { webfingerJrd, validateActivity, isUrl, ProtoError, MAX_INBOX_BODY, threadCreator, Inbound, MAX_GROUP, MAX_CLIENT_KEYS } from '../shared/activity';
 import { verifyRequest, SigError, POST_COMPONENTS, GET_COMPONENTS, signRequest } from '../shared/httpsig';
 import { digestMatches, contentDigest } from '../shared/digest';
 import { multikeyDecode, te } from '../shared/enc';
-import { onQueued, decide } from './inboxq';
+import { onQueued, decide, MAX_REQUESTS_PER_SENDER } from './inboxq';
 
 type Handler = (req: Request, env: Env, ctx: ExecutionContext) => Promise<Response>;
 let selfHandler: Handler | null = null;
@@ -19,12 +19,27 @@ export async function federatedFetch(env: Env, ctx: ExecutionContext, url: strin
 
 export interface ActorDoc { id: string; inbox: string; preferredUsername?: string; name?: string; assertionMethod?: any[]; keyAgreement?: any[]; [k: string]: any }
 
-export async function fetchActor(env: Env, ctx: ExecutionContext, actorId: string, fresh = false): Promise<ActorDoc> {
+/** How old a cached actor document may be when choosing keys to encrypt to: a new agent key or a rotated key is picked up quickly. */
+export const SEND_MAX_AGE_MS = 15_000;
+
+/**
+ * Fetches an actor document, using the D1 cache when it is younger than `maxAgeMs` (1 hour for checking
+ * signatures). When a refetch for a shorter age fails, a cached copy under an hour old is used instead.
+ */
+export async function fetchActor(env: Env, ctx: ExecutionContext, actorId: string, fresh = false, maxAgeMs = 3600_000): Promise<ActorDoc> {
   if (!isUrl(actorId)) throw new HttpError(400, 'bad_request', 'actor must be an https URL');
-  if (!fresh) {
-    const c = await env.DB.prepare('SELECT doc, fetched_at FROM actor_cache WHERE actor_id = ?').bind(actorId).first<{ doc: string; fetched_at: string }>();
-    if (c && Date.parse(c.fetched_at) > Date.now() - 3600_000) return JSON.parse(c.doc);
+  const c = fresh ? null : await env.DB.prepare('SELECT doc, fetched_at FROM actor_cache WHERE actor_id = ?').bind(actorId).first<{ doc: string; fetched_at: string }>();
+  const age = c ? Date.now() - Date.parse(c.fetched_at) : Infinity;
+  if (c && age < maxAgeMs) return JSON.parse(c.doc);
+  try {
+    return await fetchActorNow(env, ctx, actorId);
+  } catch (e) {
+    if (c && age < 3600_000) return JSON.parse(c.doc);
+    throw e;
   }
+}
+
+async function fetchActorNow(env: Env, ctx: ExecutionContext, actorId: string): Promise<ActorDoc> {
   let res: Response;
   try {
     res = await federatedFetch(env, ctx, actorId, { headers: { accept: 'application/activity+json' }, signal: AbortSignal.timeout(5000) });
@@ -48,18 +63,29 @@ export function signingKeyFromDoc(doc: ActorDoc, keyId: string): Uint8Array {
   throw new SigError('key_unavailable', 'key is not an Ed25519 Multikey');
 }
 
-export function encKeyFromDoc(doc: ActorDoc): { keyId: string; publicKey: Uint8Array } | null {
+/** The key senders encrypt to (the last X25519 entry) and the extra client keys the actor names in am:alsoEncryptTo. */
+export function encKeyFromDoc(doc: ActorDoc): { keyId: string; publicKey: Uint8Array; also: { keyId: string; publicKey: Uint8Array }[] } | null {
   const list = (Array.isArray(doc.keyAgreement) ? doc.keyAgreement : []).filter((x: any) => x?.controller === doc.id && typeof x?.id === 'string');
+  const x25519 = (e: any): Uint8Array | null => { try { const d = multikeyDecode(e.publicKeyMultibase); return d.kind === 'x25519' ? d.key : null; } catch { return null; } };
   for (let i = list.length - 1; i >= 0; i--) {
-    try { const d = multikeyDecode(list[i].publicKeyMultibase); if (d.kind === 'x25519') return { keyId: list[i].id, publicKey: d.key }; } catch {}
+    const key = x25519(list[i]);
+    if (!key) continue;
+    const wanted: unknown[] = Array.isArray(doc['am:alsoEncryptTo']) ? doc['am:alsoEncryptTo'] : [];
+    const also: { keyId: string; publicKey: Uint8Array }[] = [];
+    for (const id of wanted) {
+      const e = list.find((x: any) => x.id === id && x.id !== list[i].id);
+      const k = e ? x25519(e) : null;
+      if (e && k && also.length < MAX_CLIENT_KEYS && !also.some(a => a.keyId === e.id)) also.push({ keyId: e.id as string, publicKey: k });
+    }
+    return { keyId: list[i].id, publicKey: key, also };
   }
   return null;
 }
 
 /** Resolves `user@host` (WebFinger) or an actor URL to its actor document. */
-export async function resolveAddress(env: Env, ctx: ExecutionContext, to: string): Promise<ActorDoc> {
+export async function resolveAddress(env: Env, ctx: ExecutionContext, to: string, maxAgeMs = 3600_000): Promise<ActorDoc> {
   const t = to.trim().replace(/^acct:/, '').replace(/^@/, '');
-  if (isUrl(t)) return fetchActor(env, ctx, t);
+  if (isUrl(t)) return fetchActor(env, ctx, t, false, maxAgeMs);
   const m = /^([^@\s]+)@([^@\s/]+)$/.exec(t);
   if (!m) throw new HttpError(422, 'unknown_recipient', `${to} is not a handle or actor URL`);
   const scheme = (env.ALLOW_HTTP_LOCALHOST === '1' && /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(m[2])) ? 'http' : 'https';
@@ -71,7 +97,7 @@ export async function resolveAddress(env: Env, ctx: ExecutionContext, to: string
   const jrd: any = await res.json().catch(() => null);
   const link = (jrd?.links ?? []).find((l: any) => l?.rel === 'self' && l?.type === 'application/activity+json' && isUrl(l?.href));
   if (!link) throw new HttpError(422, 'unknown_recipient', `${to}: no ActivityPub actor link`);
-  try { return await fetchActor(env, ctx, link.href); } catch (e) { throw new HttpError(422, 'unknown_recipient', `${to}: ${(e as Error).message}`); }
+  try { return await fetchActor(env, ctx, link.href, false, maxAgeMs); } catch (e) { throw new HttpError(422, 'unknown_recipient', `${to}: ${(e as Error).message}`); }
 }
 
 export async function webfinger(req: Request, env: Env): Promise<Response> {
@@ -207,6 +233,11 @@ async function receive(env: Env, ctx: ExecutionContext, user: UserRow, act: Inbo
   // Decide
   const action = await decide(env, user.id, act.actor);
   if (action === 'block') return 'accepted';
+  if (action === 'request') {
+    // A stranger gets a few messages held, not an unlimited store on someone else's instance.
+    const waiting = (await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE user_id = ? AND direction = 'in' AND state = 'request' AND actor = ?").bind(user.id, act.actor).first<{ n: number }>())?.n ?? 0;
+    if (waiting >= MAX_REQUESTS_PER_SENDER) return 'accepted';
+  }
   // Thread state
   if (!thread) {
     const members = act.type === 'Create' ? [...new Set([act.actor, ...act.to])] : [...new Set(act.members)];

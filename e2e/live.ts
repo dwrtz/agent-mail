@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { Account, Probe, waitFor } from './lib';
 import { runSuite } from './suite';
+import { runAgentSuite } from './agents';
 import { runUi } from './ui';
 import { b64url, randomBytes, unb64url } from '../src/shared/enc';
 
@@ -17,7 +18,9 @@ async function main() {
   await B.signup('bob@example.com', pw(), 'bob', 'Bob');
   await C.signup('carol@example.com', pw(), 'carol', 'Carol');
   for (const x of [A, B, C]) await x.setupKey();
-  const results: any[] = await runSuite({ A, B, C, probe: new Probe(B_URL, unb64url(probe.privateKey)), sinkBase: B_URL, log: s => console.log(s) });
+  const ctx = { A, B, C, probe: new Probe(B_URL, unb64url(probe.privateKey)), sinkBase: B_URL, log: (s: string) => console.log(s) };
+  const results: any[] = await runSuite(ctx);
+  results.push(...await runAgentSuite(ctx));
   try {
     const dPw = pw();
     const D = new Account(B_URL); await D.signup('dave@example.com', dPw, 'dave', 'Dave'); await D.setupKey();

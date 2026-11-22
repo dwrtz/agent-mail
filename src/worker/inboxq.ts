@@ -14,12 +14,30 @@ export async function onQueued(env: Env, ctx: ExecutionContext, user: UserRow, m
   ctx.waitUntil(doorbell(env, ctx, user.id, false).catch(e => console.log('[doorbell] error', String(e))));
 }
 
-export async function counts(env: Env, userId: number) {
+// Unacked for one consumer (?1 user, ?2 consumer): past its high-water mark and not individually acked.
+const UNACKED = `q.user_id = ?1 AND q.cursor > COALESCE((SELECT upto FROM consumers WHERE user_id = ?1 AND consumer = ?2), 0)
+  AND NOT EXISTS (SELECT 1 FROM consumer_acks a WHERE a.user_id = ?1 AND a.consumer = ?2 AND a.cursor = q.cursor)`;
+
+/** Queue counts as one consumer sees them ('session' or 'token:<id>'): each agent has its own position. */
+export async function counts(env: Env, userId: number, consumer = 'session') {
   const r = await env.DB.prepare(`SELECT
-      (SELECT COUNT(*) FROM inbox_queue WHERE user_id = ?1 AND acked_at IS NULL) AS unread,
+      (SELECT COUNT(*) FROM inbox_queue q WHERE ${UNACKED}) AS unread,
       (SELECT COUNT(*) FROM messages WHERE user_id = ?1 AND direction = 'in' AND state = 'request') AS requests,
-      (SELECT COALESCE(MAX(cursor), 0) FROM inbox_queue WHERE user_id = ?1 AND acked_at IS NULL) AS latestCursor`).bind(userId).first<{ unread: number; requests: number; latestCursor: number }>();
+      (SELECT COALESCE(MAX(q.cursor), 0) FROM inbox_queue q WHERE ${UNACKED}) AS latestCursor`).bind(userId, consumer).first<{ unread: number; requests: number; latestCursor: number }>();
   return r ?? { unread: 0, requests: 0, latestCursor: 0 };
+}
+
+/** What the doorbell reports: the most any of the user's agents has waiting (the owner's own count when there are no tokens). */
+async function doorbellCounts(env: Env, userId: number) {
+  const r = await env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM api_tokens WHERE user_id = ?1) AS tokens,
+      (SELECT COALESCE(MAX(n), 0) FROM (SELECT (SELECT COUNT(*) FROM inbox_queue q WHERE q.user_id = t.user_id
+          AND q.cursor > COALESCE((SELECT upto FROM consumers c WHERE c.user_id = t.user_id AND c.consumer = 'token:' || t.id), 0)
+          AND NOT EXISTS (SELECT 1 FROM consumer_acks a WHERE a.user_id = t.user_id AND a.consumer = 'token:' || t.id AND a.cursor = q.cursor)) AS n
+        FROM api_tokens t WHERE t.user_id = ?1)) AS unread,
+      (SELECT COUNT(*) FROM messages WHERE user_id = ?1 AND direction = 'in' AND state = 'request') AS requests`).bind(userId).first<{ tokens: number; unread: number; requests: number }>();
+  if (!r) return { unread: 0, requests: 0 };
+  return { unread: r.tokens ? r.unread : (await counts(env, userId)).unread, requests: r.requests };
 }
 
 /** Messages the owner has not opened yet (the web app's Inbox badge; separate from the agent queue). */
@@ -28,36 +46,52 @@ export async function unreadMessages(env: Env, userId: number): Promise<number> 
   return r?.n ?? 0;
 }
 
-export async function pull(env: Env, userId: number, since = 0, limit = 50) {
+export async function pull(env: Env, userId: number, consumer: string, since = 0, limit = 50) {
   limit = Math.max(1, Math.min(100, Math.floor(limit) || 50));
-  const rows = (await env.DB.prepare(`SELECT q.cursor, q.created_at, m.type, m.actor, m.thread, m.activity, m.gap_before, m.received_at
+  since = Math.max(0, Math.floor(since) || 0);
+  const rows = (await env.DB.prepare(`SELECT q.cursor, q.created_at, m.type, m.actor, m.thread, m.note_id, m.activity, m.gap_before, m.received_at
       FROM inbox_queue q JOIN messages m ON m.id = q.message_id
-      WHERE q.user_id = ? AND q.acked_at IS NULL AND q.cursor > ? ORDER BY q.cursor LIMIT ?`).bind(userId, Math.max(0, Math.floor(since) || 0), limit + 1).all<any>()).results;
+      WHERE ${UNACKED} AND q.cursor > ?3 ORDER BY q.cursor LIMIT ?4`).bind(userId, consumer, since, limit + 1).all<any>()).results;
   const more = rows.length > limit;
-  const items = rows.slice(0, limit).map(r => ({
-    cursor: r.cursor, kind: r.type === 'Create' ? 'message' : 'membership', sender: r.actor, thread: r.thread,
-    receivedAt: r.received_at, gapBefore: r.gap_before, activity: JSON.parse(r.activity),
-  }));
-  return { items, nextCursor: items.length ? items[items.length - 1].cursor : Math.max(0, since || 0), more };
+  const items = rows.slice(0, limit).map(r => {
+    const activity = JSON.parse(r.activity);
+    return {
+      cursor: r.cursor, kind: r.type === 'Create' ? 'message' : 'membership', sender: r.actor, thread: r.thread, noteId: r.note_id ?? null,
+      agent: activity?.object?.['am:agent'] === true, receivedAt: r.received_at, gapBefore: r.gap_before, activity,
+    };
+  });
+  return { items, nextCursor: items.length ? items[items.length - 1].cursor : since, more };
 }
 
-export async function ack(env: Env, userId: number, body: { upTo?: number; ids?: number[] }) {
-  const now = nowIso();
+/** Acks for one consumer only: another agent's queue is untouched. */
+export async function ack(env: Env, userId: number, consumer: string, body: { upTo?: number; ids?: number[] }) {
+  if (!Number.isInteger(body?.upTo) && !Array.isArray(body?.ids)) throw new HttpError(400, 'bad_request', 'give upTo or ids');
   let acked = 0;
   if (Number.isInteger(body.upTo)) {
-    acked += (await env.DB.prepare('UPDATE inbox_queue SET acked_at = ? WHERE user_id = ? AND acked_at IS NULL AND cursor <= ?').bind(now, userId, body.upTo).run()).meta.changes;
+    const max = (await env.DB.prepare('SELECT COALESCE(MAX(cursor), 0) AS m FROM inbox_queue WHERE user_id = ?').bind(userId).first<{ m: number }>())?.m ?? 0;
+    const upTo = Math.min(body.upTo!, max); // never ack items that do not exist yet
+    acked += (await env.DB.prepare(`SELECT COUNT(*) AS n FROM inbox_queue q WHERE ${UNACKED} AND q.cursor <= ?3`).bind(userId, consumer, upTo).first<{ n: number }>())?.n ?? 0;
+    await env.DB.batch([
+      env.DB.prepare('INSERT INTO consumers (user_id, consumer, upto) VALUES (?, ?, ?) ON CONFLICT(user_id, consumer) DO UPDATE SET upto = MAX(upto, excluded.upto)').bind(userId, consumer, upTo),
+      env.DB.prepare('DELETE FROM consumer_acks WHERE user_id = ? AND consumer = ? AND cursor <= ?').bind(userId, consumer, upTo),
+    ]);
   }
   if (Array.isArray(body.ids) && body.ids.length) {
-    const ids = body.ids.filter(Number.isInteger).slice(0, 500);
-    for (const id of ids) acked += (await env.DB.prepare('UPDATE inbox_queue SET acked_at = ? WHERE user_id = ? AND acked_at IS NULL AND cursor = ?').bind(now, userId, id).run()).meta.changes;
+    for (const id of body.ids.filter(Number.isInteger).slice(0, 500)) {
+      acked += (await env.DB.prepare(`INSERT OR IGNORE INTO consumer_acks (user_id, consumer, cursor) SELECT ?1, ?2, q.cursor FROM inbox_queue q WHERE ${UNACKED} AND q.cursor = ?3`).bind(userId, consumer, id).run()).meta.changes;
+    }
   }
-  if (!Number.isInteger(body.upTo) && !Array.isArray(body.ids)) throw new HttpError(400, 'bad_request', 'give upTo or ids');
-  return { acked, unread: (await counts(env, userId)).unread };
+  return { acked, unread: (await counts(env, userId, consumer)).unread };
 }
 
-export async function listRequests(env: Env, userId: number) {
-  const rows = (await env.DB.prepare("SELECT id, actor, thread, activity, received_at FROM messages WHERE user_id = ? AND direction = 'in' AND state = 'request' ORDER BY id").bind(userId).all<any>()).results;
-  return { items: rows.map(r => ({ id: r.id, sender: r.actor, thread: r.thread, receivedAt: r.received_at, activity: JSON.parse(r.activity) })) };
+/** How many requests one sender can have waiting. More are accepted and dropped, as for a blocked sender. */
+export const MAX_REQUESTS_PER_SENDER = 20;
+
+/** The oldest pending requests, at most `limit` (1-100), with `more` when there are more. */
+export async function listRequests(env: Env, userId: number, limit = 100) {
+  limit = Math.max(1, Math.min(100, Math.floor(limit) || 100));
+  const rows = (await env.DB.prepare("SELECT id, actor, thread, activity, received_at FROM messages WHERE user_id = ? AND direction = 'in' AND state = 'request' ORDER BY id LIMIT ?").bind(userId, limit + 1).all<any>()).results;
+  return { items: rows.slice(0, limit).map(r => ({ id: r.id, sender: r.actor, thread: r.thread, receivedAt: r.received_at, activity: JSON.parse(r.activity) })), more: rows.length > limit };
 }
 
 export async function setRule(env: Env, userId: number, subject: string, action: 'allow' | 'block') {
@@ -109,9 +143,9 @@ export async function doorbell(env: Env, ctx: ExecutionContext, userId: number, 
     }
     await env.DB.prepare('UPDATE users SET doorbell_next_at = ? WHERE id = ?').bind(new Date(now + WINDOW_MS).toISOString(), userId).run();
   }
-  const c = await counts(env, userId);
+  const c = await doorbellCounts(env, userId);
   const body = JSON.stringify({ type: 'agent-mail.doorbell', handle: addressOf(env, u.handle), unread: c.unread, requests: c.requests, at: new Date().toISOString() });
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  const headers: Record<string, string> = { ...parseJson<Record<string, string>>(u.doorbell_extra, {}), 'content-type': 'application/json' };
   if (u.doorbell_value) headers[(u.doorbell_header || 'Authorization').toLowerCase()] = u.doorbell_value;
   try {
     const res = await fetch(u.doorbell_url, { method: 'POST', headers, body, signal: AbortSignal.timeout(10000) });
@@ -122,4 +156,3 @@ export async function doorbell(env: Env, ctx: ExecutionContext, userId: number, 
     return 0;
   }
 }
-void parseJson;

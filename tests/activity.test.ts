@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateActivity, threadCreator, ProtoError, MAX_GROUP } from '../src/shared/activity';
+import { validateActivity, threadCreator, ProtoError, MAX_GROUP, MAX_CLIENT_KEYS, actorDocument } from '../src/shared/activity';
 import { readFileSync } from 'node:fs';
 const V = JSON.parse(readFileSync(new URL('../spec/test-vectors.json', import.meta.url), 'utf8'));
 const create = () => JSON.parse(V.signed_post.body_utf8);
@@ -18,6 +18,22 @@ describe('activity shapes (protocol.md section 4)', () => {
     expect(err(() => validateActivity(noSeq))).toBe('400 bad_activity');
     const att = create(); att.object.attachment[0].url = 'https://other.example/attachments/x';
     expect(err(() => validateActivity(att))).toBe('400 bad_activity');
+  });
+  it('accepts am:copies and am:agent, and checks the shape of copies (0.2 extensions)', () => {
+    const copy = { keyId: 'https://b.example/users/bob#enc-2', enc: 'A'.repeat(43), ct: 'B'.repeat(40) };
+    const ok = create(); ok.object['am:copies'] = [copy]; ok.object['am:agent'] = true;
+    expect(validateActivity(ok).type).toBe('Create');
+    const many = create(); many.object['am:copies'] = Array.from({ length: MAX_CLIENT_KEYS + 1 }, () => copy);
+    expect(err(() => validateActivity(many))).toBe('400 bad_activity');
+    const short = create(); short.object['am:copies'] = [{ ...copy, enc: 'A' }];
+    expect(err(() => validateActivity(short))).toBe('400 bad_activity');
+    const notList = create(); notList.object['am:copies'] = copy;
+    expect(err(() => validateActivity(notList))).toBe('400 bad_activity');
+  });
+  it('lists client keys in am:alsoEncryptTo only when there are some', () => {
+    const base = { origin: 'https://a.example', handle: 'alice', name: 'Alice', readReceipts: false, sigKeys: [], encKeys: [] };
+    expect('am:alsoEncryptTo' in actorDocument(base)).toBe(false);
+    expect((actorDocument({ ...base, alsoEncryptTo: ['https://a.example/users/alice#enc-2'] }) as any)['am:alsoEncryptTo']).toEqual(['https://a.example/users/alice#enc-2']);
   });
   it('Add/Remove and Read', () => {
     const base = { '@context': [], id: 'https://a.example/users/alice/activities/1', actor: 'https://a.example/users/alice', to: ['https://b.example/users/bob'], published: '2026-11-17T00:00:00Z' };

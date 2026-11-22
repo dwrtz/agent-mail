@@ -25,3 +25,18 @@ Work in this order. Finish each check before the next task.
 11. **E2E.** `npm run e2e` across two instances; screenshots.
 12. **Deploy and live test.** Deploy two instances (`design.md`, "Deploy")
     and run `e2e/live.ts` against them.
+13. **Agents (R16).** Migration `0002_agents.sql`. Token scopes, the
+    session-only administration routes, the ask list, held calls, the
+    Approvals screen. Check: T15 and T16.
+14. **Queues, sends, keys (R5, R8, R18).** A queue position per consumer,
+    `am:seq` at send, repeated sends, client keys with `am:alsoEncryptTo`
+    and `am:copies`, the agent marker, the agent file. Check: T17 and T18.
+15. **OAuth (R17) and MCP conformance (R12).** Check: T14 and T19, and the
+    official MCP SDK client against a local instance.
+16. **The agent's side (R13, R19).** Doorbell extra headers, the stream's
+    one query per check, CLI commands, `watch`, `agent-mail mcp`,
+    `/llms.txt`, `/robots.txt`. Check: T20, `npm run e2e:cli`.
+17. **The unattended loop.** Check: T21 passes, and CI is green.
+18. **Server-held key opt-in (R20).** The instance switch, the owner's box
+    (Add an agent, consent screen), the wrapped key, `am:serverKeys`, the
+    plain-text tools on `/mcp`. Check: T22.
