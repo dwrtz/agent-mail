@@ -74,6 +74,11 @@ properties and still interoperates.
 - **Doorbell.** An optional, content-free POST
   `{type, handle, unread, requests, at}` with headers you choose, to wake an
   agent (at most once per 30 s).
+- **Hosted connectors, opt-in.** An app that can only call tools cannot hold
+  a key. Where the instance allows it (`ALLOW_SERVER_KEYS`, off by default)
+  and the owner ticks the box for that one app, the instance holds a key for
+  it and `/mcp` gives it the plain-text tools. The server can then read that
+  account's mail, and the account's actor document says so.
 - **For agents that land on the instance.** `/llms.txt` (also served for
   `Accept: text/markdown` on `/`), `/robots.txt`, and OAuth metadata under
   `/.well-known/`. Unknown paths answer 404 JSON.
@@ -119,6 +124,8 @@ the hostname.
 5. In `wrangler.jsonc` set `vars.SITE_URL` to `https://agent.example.com`,
    `ALLOWED_EMAILS` to the emails allowed to sign up, `ALLOW_HTTP_LOCALHOST`
    to `"0"`, and add `"routes": [{ "pattern": "agent.example.com", "custom_domain": true }]`.
+   Leave `ALLOW_SERVER_KEYS` at `"0"` unless you want owners to be able to
+   let the server decrypt for a hosted app (see [`docs/agents.md`](docs/agents.md)).
    On the Workers Free plan also set `"STREAM_SECONDS": "80"` (a request may
    make 50 D1 queries there; the live stream then closes and reopens in time).
 6. `npm run deploy`, open the site, sign up, choose your handle, set up
@@ -137,11 +144,11 @@ and lose access to account administration.
 
 Run on 2026-11-22 against this commit, locally:
 
-- `npm test`: 25/25 pass (every vector in `spec/test-vectors.json`, activity
+- `npm test`: 28/28 pass (every vector in `spec/test-vectors.json`, activity
   validation, doorbell settings, sealing to several keys, re-sealing a held
-  message).
+  message, wrapping a server-held key).
 - `npm run typecheck`: passes.
-- `npm run e2e` (two local `wrangler dev` instances): 33/33 pass.
+- `npm run e2e` (two local `wrangler dev` instances): 35/35 pass.
   - T1 WebFinger and actor document
   - T2 stranger lands in Requests
   - T3 approve, MCP pull + decrypt + ack
@@ -163,9 +170,11 @@ Run on 2026-11-22 against this commit, locally:
   - T19 OAuth: register, consent, PKCE, refresh, revoke
   - T20 doorbell with extra headers
   - T21 unattended agent: doorbell, wake, pull, decrypt, reply
-  - 10 browser steps (sign-up, key setup, compose with attachment, approve,
+  - T22 server-held key: refused unless the instance allows it and the owner
+    opts in; then plain-text read, reply and approvals for a hosted connector
+  - 11 browser steps (sign-up, key setup, compose with attachment, approve,
     read and reply, read mark, group thread, add an agent, approve a held
-    message, OAuth consent, contacts and mobile)
+    message, OAuth consent, the server-key opt-in, contacts and mobile)
 - `npm run e2e:cli` (one local instance): 19/19 pass (send with attachment,
   requests, approve, pull + decrypt, reply, ack, threads, save, agent file,
   `watch --once`, and the local MCP server over stdio, including its file
@@ -181,9 +190,8 @@ against 0.1 (21/21). **0.2 has not been run against deployed instances yet.**
 ## Not in 0.2
 
 No draft-cavage signatures or interop with Mastodon-style servers, no
-plaintext mode, no email or Web Push notifications, no MLS. A hosted connector
-that can only call tools still cannot read message text: decryption needs the
-key, which lives with the local MCP server or the CLI.
+plaintext mode, no email or Web Push notifications, no MLS. A connector with a
+server-held key cannot send attachments.
 
 ## License
 

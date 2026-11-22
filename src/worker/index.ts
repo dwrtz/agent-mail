@@ -1,4 +1,4 @@
-import { Env, HttpError, json, errorResponse, nowIso, origin, host, QueueMsg, Caller } from './env';
+import { Env, HttpError, json, errorResponse, nowIso, origin, host, QueueMsg, Caller, serverKeysAllowed } from './env';
 import { webfinger, actorResponse, inbox, outboxCollection, attachmentGet, setSelfHandler } from './federation';
 import { signup, login, logout, authenticate } from './auth';
 import { ownerApi, sendFromApi } from './api';
@@ -28,13 +28,13 @@ function llmsTxt(env: Env): string {
   const o = origin(env), h = host(env);
   return `# ${settings.app_name} at ${h}
 
-> Federated, end-to-end encrypted messaging for people and their AI agents. This is one instance: it hosts addresses like name@${h}. The server stores only ciphertext.
+> Federated, end-to-end encrypted messaging for people and their AI agents. This is one instance: it hosts addresses like name@${h}. ${serverKeysAllowed(env) ? 'The server stores only ciphertext, except for an account whose owner chose to let it hold a key for a connected app; such an account says so in its actor document (am:serverKeys).' : 'The server stores only ciphertext and holds no encryption keys.'}
 
 ## If you act for an account on this instance
 
 - MCP endpoint (Streamable HTTP): ${o}/mcp
 - Sign in with OAuth 2.1 (metadata: ${o}/.well-known/oauth-protected-resource), or send a connector token as \`Authorization: Bearer <token>\`. The owner creates agents and tokens under Settings.
-- Message text is encrypted to the account's keys, so the MCP endpoint returns ciphertext. Decrypt and encrypt on your side with the agent file the owner gave you. The agent-mail CLI does both, and \`agent-mail mcp\` runs a local MCP server with plaintext tools (read_inbox, reply, send).
+- Message text is encrypted to the account's keys, so the MCP endpoint returns ciphertext. Decrypt and encrypt on your side with the agent file the owner gave you. The agent-mail CLI does both, and \`agent-mail mcp\` runs a local MCP server with plaintext tools (read_inbox, reply, send).${serverKeysAllowed(env) ? '\n- If you cannot hold a key or run that, the owner can opt your connection in to a key held by this server; the MCP endpoint then gives you the same plain-text tools directly.' : ''}
 - You work on your own. Calls that answer \`{"status":"pending_approval"}\` wait for the owner; do not retry them.
 - Setup guide: ${DOCS}
 
@@ -99,7 +99,7 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext): Promise<Re
       if (path === '/api/auth/signup' && m === 'POST') { const r = await signup(env, await req.json().catch(() => ({}))); return json({ ok: true }, 200, { 'set-cookie': r.cookie }); }
       if (path === '/api/auth/login' && m === 'POST') { const r = await login(env, await req.json().catch(() => ({}))); return json({ ok: true }, 200, { 'set-cookie': r.cookie }); }
       if (path === '/api/auth/logout' && m === 'POST') return json({}, 200, { 'set-cookie': await logout(env, req) });
-      if (path === '/api/config' && m === 'GET') return json({ host: host(env), origin: origin(env) });
+      if (path === '/api/config' && m === 'GET') return json({ host: host(env), origin: origin(env), serverKeys: serverKeysAllowed(env) });
       return await ownerApi(req, env, ctx, await requireCaller(env, req), path);
     }
     if (m === 'GET' || m === 'HEAD') {

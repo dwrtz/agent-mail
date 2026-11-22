@@ -32,7 +32,9 @@ else it does without asking.
 The Worker never sees message text. Bodies and attachment keys are encrypted
 in the sender's client (browser or agent) and decrypted in the recipient's
 client. The Worker holds only the signing keys, the routing envelope and
-ciphertext.
+ciphertext. The one exception is opt-in twice over and said openly (R20):
+where the instance allows it and an owner asks for it, the instance holds a
+key for one hosted connector that cannot hold a key itself.
 
 Read `spekkr.inputs.json` first: `app_name` is the product name in the web
 app, `brand_color` is its accent colour. `protocol.md` is the normative wire
@@ -62,7 +64,7 @@ based on and is context, not extra requirements.
   key file is moved by hand; agents get keys of their own, R18).
 - Web Push, email digests.
 - Editing or deleting delivered messages.
-- Decrypting on the server for hosted connectors that cannot hold a key.
+- Sending attachments from a connector with a server-held key (R20).
 
 ## Requirements
 
@@ -76,7 +78,8 @@ Each requirement has an id. Tests name the id they cover.
   server.
 - Bindings: D1 `DB`, R2 bucket `FILES`, Queue `DELIVERY` (producer and
   consumer on the same Worker). Vars `SITE_URL`, `ALLOWED_EMAILS`,
-  `ALLOW_SIGNUP`, `ALLOW_HTTP_LOCALHOST`, optional `STREAM_SECONDS` (R12);
+  `ALLOW_SIGNUP`, `ALLOW_HTTP_LOCALHOST`, optional `STREAM_SECONDS` (R12)
+  and `ALLOW_SERVER_KEYS` (R20);
   secret `SIGNING_SEED`. A cron trigger every 15 minutes does cleanup. Exact
   config in `design.md`.
 - `SITE_URL` (like `https://agent.example.com`, no trailing slash) is the
@@ -395,9 +398,11 @@ reader.
   stream ends after `STREAM_SECONDS` (default 600, at most 600) and the
   client reopens it. (Workers Free allows 50 D1 queries per request: set
   `STREAM_SECONDS` to 80 there.)
-- The Worker never decrypts. `pull` returns ciphertext; the client decrypts
+- The Worker does not decrypt. `pull` returns ciphertext; the client decrypts
   with its key. The repo ships that client: `cli/agent-mail.mjs`, a Node
-  CLI that is also a local MCP server with plain text tools (R19).
+  CLI that is also a local MCP server with plain text tools (R19). The
+  exception is a connector the owner opted in to a server-held key: it is
+  given plain-text tools instead (R20).
 
 Check: an MCP client initializes, subscribes, opens the stream, receives
 `notifications/resources/updated` within 5 s of a new allowed message,
@@ -666,8 +671,68 @@ MCP server over stdio (initialize, tools, read, reply, wait; a path outside
 the files folder and an agent file as attachment are refused); the
 discovery files answer with the stated types.
 
+### R20. Hosted connectors: an opt-in server-held key
+
+Some connectors can only call tools: they cannot hold a key or run the CLI,
+so through `/mcp` they only ever see ciphertext. For those, and only when
+the owner asks for it, the instance can hold a key and decrypt for them.
+This gives up, for that account, the promise that the Worker never sees
+message text. So it is never a default, and it is said openly.
+
+- **Two switches, both off by default.** The instance: var
+  `ALLOW_SERVER_KEYS` = `"1"` (absent or anything else: the instance holds
+  no encryption keys at all, and `GET /api/config` says
+  `serverKeys: false`). The owner, per connector: a box they tick, in
+  their own session, when adding an agent ("Let this server decrypt for it
+  instead") or on the OAuth consent screen ("Let this server decrypt for
+  it"). The box is unticked by default, says in plain words that the server
+  can then read their mail and what people send them, and the web app asks
+  once more before going on. A token can never opt anything in. With the
+  instance switch off, an opt-in is refused with 403
+  `server_keys_disabled` and nothing is created.
+- **The key.** On opt-in the instance makes an X25519 key pair for that
+  one connector and publishes the public key as a client key bound to its
+  token (R18). The private key never leaves the Worker. It is stored
+  wrapped: AES-256-GCM under a key derived from `SIGNING_SEED` with
+  HKDF-SHA256 (salt `agent-mail/0.2 server-key`, info `wrap:<key id>`),
+  with the key id as associated data, so the database alone does not give
+  it away. The owner's own key is never uploaded: such a connector reads
+  what is sent after its key was published, like any agent with its own
+  key.
+- **Said openly.** The actor lists the key in `am:alsoEncryptTo` and also
+  in `am:serverKeys` (`protocol.md`), so anyone writing to this address can
+  see that its server holds a key. The owner's list of agents marks the
+  agent ("server decrypts").
+- **What the connector gets.** For a token with a server-held key, `/mcp`
+  lists plain-text tools instead of the ciphertext ones, with the same
+  names and shapes as the local MCP server (R19): `whoami`, `check_mail`,
+  `read_inbox`, `ack`, `list_threads`, `read_thread`, `list_requests`,
+  `get_attachment`, `mark_read`, `reply`, `send`, `approve_sender`,
+  `block_sender`, `list_approvals`, `cancel_approval`. The instance opens
+  mail with the connector's key, and seals what the connector writes to
+  the recipients' keys and to the owner's (so the owner reads it too, and
+  can approve a held message as in R16). Attachments can be read up to
+  1 MiB; sending attachments this way is not supported.
+- **Nothing else changes.** Scopes, the ask list, approvals, the
+  connector's own queue position and the agent marker all apply as for any
+  agent. Plain text is never logged or stored.
+- **Taking it back.** Revoking the agent, or removing its key, deletes the
+  wrapped key and the entry in `am:serverKeys`. Turning the instance switch
+  off stops all server-side decryption at once: such tokens fall back to
+  the ciphertext tools.
+
+Check: with the instance switch off, an opt-in is refused and no token is
+made; with it on, a token made without the box has only the ciphertext
+tools and the actor has no `am:serverKeys`; after the owner opts a token
+in, the actor names the key in `am:serverKeys`, the connector reads a
+message and an attachment as plain text, replies, and the reply arrives
+encrypted and marked as an agent's; a first contact is still held and the
+owner approves what they read; an OAuth consent with the box gives the
+plain-text tools and one without it the ciphertext tools; revoking removes
+the key and the statement.
+
 ## Definition of done
 
 `npm test`, `npm run e2e` and `npm run e2e:cli` pass, the two-instance e2e
-covers R4-R19 including the unattended loop, and a deploy following
+covers R4-R20 including the unattended loop, and a deploy following
 `design.md` ("Deploy") answers WebFinger for its first user.

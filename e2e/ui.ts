@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { Account, waitFor } from './lib';
 import { KeyFile, decryptActivity } from '../src/shared/client';
 import { main as cli } from '../cli/src/cli';
+import { McpClient } from '../cli/src/mcp-client';
 import { b64url, randomBytes, sha256 } from '../src/shared/enc';
 
 export interface UiOpts {
@@ -165,6 +166,23 @@ export async function runUi(o: UiOpts) {
       await fresh.context().close();
       await a.goto(`${o.A.base}/settings`);
       await a.getByText('connected app').waitFor();
+    });
+    if (((await (await fetch(`${o.B.base}/api/config`)).json()) as any).serverKeys) await step('The owner opts an app in to a server-held key, in the browser', async () => {
+      await b.goto(`${o.B.base}/settings`);
+      await b.getByLabel('Agent name').fill('Hosted App');
+      await b.getByLabel(/Let this server decrypt for it instead/).check();
+      let asked = '';
+      b.once('dialog', d => { asked = d.message(); void d.accept(); });
+      await b.getByRole('button', { name: 'Add agent' }).click();
+      await b.locator('code.token').waitFor();
+      if (!asked.includes('Let this server read your mail')) throw new Error('the opt-in must be confirmed once more');
+      const token = (await b.locator('code.token').textContent())!;
+      const mcp = new McpClient(`${o.B.base}/mcp`, token); await mcp.init();
+      const names: string[] = (await mcp.rpc('tools/list')).tools.map((x: any) => x.name);
+      if (!names.includes('read_inbox') || names.includes('pull')) throw new Error(`expected plain-text tools: ${names}`);
+      await b.locator('code.token').evaluate(el => { el.textContent = 'am_••••••••••••••••••••••••••••••••'; });
+      await b.getByText('server decrypts').waitFor();
+      await shot(b, 'settings-server-key');
     });
     await step('Contacts and mobile', async () => {
       await a.getByRole('link', { name: 'Contacts' }).click();

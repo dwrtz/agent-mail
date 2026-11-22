@@ -73,10 +73,16 @@ context, not extra requirements.
   `am:encrypted` itself and break 0.1 receivers.
 - **OAuth 2.1 as MCP clients expect it** (RFC 9728 and 8414 metadata,
   RFC 7591 registration, client id metadata documents, PKCE), with the
-  grant stored as an ordinary scoped token. A hosted connector that can
-  only call tools still gets ciphertext: decrypting on the server for it
-  would give up the promise that the Worker never sees message text, and
-  is left out.
+  grant stored as an ordinary scoped token.
+- **A hosted connector that can only call tools** cannot hold a key, so
+  on its own it only sees ciphertext. Decrypting for it on the server
+  gives up the promise that the Worker never sees message text, so it is
+  not a mode an instance is in but a choice made twice: the operator
+  allows it (off by default), and the owner ticks a box for one connector,
+  with the consequence spelled out and confirmed. The instance then holds
+  a key for that connector only, never the owner's own key, wrapped under
+  the instance secret, and the actor says so in `am:serverKeys` so that
+  the people writing to it are not left believing otherwise.
 - **The plain-text surface is local.** `agent-mail mcp` runs next to the
   agent and holds its key, so MCP clients get readable tools without the
   instance learning anything.

@@ -3433,6 +3433,33 @@ async function decryptAttachment(stored, a) {
   return decryptFile(stored, a.key, a.iv);
 }
 
+// src/shared/view.ts
+var shortActor = (actor) => {
+  try {
+    const u = new URL(actor);
+    return `${u.pathname.split("/").pop()}@${u.host}`;
+  } catch {
+    return actor;
+  }
+};
+async function viewActivity(keys, activity, extra = {}) {
+  const base = { direction: "in", fromActor: activity.actor, from: shortActor(activity.actor), sentAt: activity.published, ...extra };
+  if (activity.type !== "Create") {
+    const who = shortActor(activity.actor), whom = shortActor(activity.object);
+    const event = activity.object === activity.actor ? `${who} left the thread` : `${who} ${activity.type === "Add" ? "added" : "removed"} ${whom}`;
+    return { ...base, kind: "membership", noteId: null, thread: activity.target, fromAgent: false, event };
+  }
+  const n = activity.object;
+  const v = { ...base, kind: "message", noteId: n.id, thread: n.context, fromAgent: n["am:agent"] === true, inReplyTo: n.inReplyTo ?? null };
+  try {
+    const p = await decryptActivity(keys, activity);
+    if (p.agent?.name) v.agentName = String(p.agent.name);
+    return { ...v, subject: p.summary, text: p.content, attachments: p.attachments.map((a, index) => ({ index, name: a.name, mediaType: a.mediaType, size: a.size })) };
+  } catch (e) {
+    return { ...v, error: `cannot decrypt: ${e.message}` };
+  }
+}
+
 // cli/src/agent.ts
 function loadConfig(env) {
   const inline = (v) => /^\s*[[{]/.test(v);
@@ -3468,14 +3495,7 @@ function insideDir(dir, p) {
   if (real !== base && !real.startsWith(base + sep)) throw new Error(`files must be inside ${base}`);
   return real;
 }
-var short = (actor) => {
-  try {
-    const u = new URL(actor);
-    return `${u.pathname.split("/").pop()}@${u.host}`;
-  } catch {
-    return actor;
-  }
-};
+var short = shortActor;
 var Agent = class {
   constructor(cfg) {
     this.cfg = cfg;
@@ -3535,19 +3555,8 @@ var Agent = class {
     }
   }
   /** Turns a stored activity into a MessageView. */
-  async view(activity, extra = {}) {
-    const base = { direction: "in", fromActor: activity.actor, from: short(activity.actor), sentAt: activity.published, ...extra };
-    if (activity.type !== "Create") {
-      const who = short(activity.actor), whom = short(activity.object);
-      const event = activity.object === activity.actor ? `${who} left the thread` : `${who} ${activity.type === "Add" ? "added" : "removed"} ${whom}`;
-      return { ...base, kind: "membership", noteId: null, thread: activity.target, fromAgent: false, event };
-    }
-    const n = activity.object;
-    const v = { ...base, kind: "message", noteId: n.id, thread: n.context, fromAgent: n["am:agent"] === true, inReplyTo: n.inReplyTo ?? null };
-    const p = await this.decrypt(activity);
-    if (p.error) return { ...v, error: `cannot decrypt: ${p.error}` };
-    if (p.agent?.name) v.agentName = String(p.agent.name);
-    return { ...v, subject: p.summary, text: p.content, attachments: p.attachments.map((a, index) => ({ index, name: a.name, mediaType: a.mediaType, size: a.size })) };
+  view(activity, extra = {}) {
+    return viewActivity(this.cfg.keys, activity, extra);
   }
   whoami() {
     return this.mcp.tool("whoami");

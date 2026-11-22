@@ -28,7 +28,7 @@ export function webfingerJrd(handle: string, host: string, actorId: string) {
 
 export interface KeyEntry { id: string; type: 'Multikey'; controller: string; publicKeyMultibase: string }
 
-export function actorDocument(o: { origin: string; handle: string; name: string; sigKeys: KeyEntry[]; encKeys: KeyEntry[]; readReceipts: boolean; alsoEncryptTo?: string[] }) {
+export function actorDocument(o: { origin: string; handle: string; name: string; sigKeys: KeyEntry[]; encKeys: KeyEntry[]; readReceipts: boolean; alsoEncryptTo?: string[]; serverKeys?: string[] }) {
   const id = `${o.origin}/users/${o.handle}`;
   return {
     '@context': ACTOR_CONTEXT,
@@ -43,6 +43,8 @@ export function actorDocument(o: { origin: string; handle: string; name: string;
     'am:protocol': PROTOCOL,
     'am:readReceipts': o.readReceipts,
     ...(o.alsoEncryptTo?.length ? { 'am:alsoEncryptTo': o.alsoEncryptTo } : {}),
+    // Said openly: the instance itself holds these keys (the owner opted in), so it can read what is sealed to them.
+    ...(o.serverKeys?.length ? { 'am:serverKeys': o.serverKeys } : {}),
   };
 }
 

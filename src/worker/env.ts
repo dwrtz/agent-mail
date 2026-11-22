@@ -9,6 +9,8 @@ export interface Env {
   SIGNING_SEED: string;
   /** Seconds an MCP server stream stays open (default 600). Workers Free allows 50 D1 queries per request: set 80 there. */
   STREAM_SECONDS?: string;
+  /** "1" lets an owner opt a connector in to a server-held key (R20). Off unless set: the Worker then never sees message text. */
+  ALLOW_SERVER_KEYS?: string;
 }
 export type QueueMsg = { kind: 'deliver'; id: number } | { kind: 'doorbell'; userId: number };
 
@@ -42,9 +44,10 @@ export type Scope = typeof SCOPES[number];
 export const ASKS = ['first_contact', 'policy', 'members', 'all_sends'] as const;
 export type Ask = typeof ASKS[number];
 export const DEFAULT_ASK: Ask[] = ['first_contact', 'policy', 'members'];
-export interface TokenInfo { id: number; label: string; kind: 'token' | 'oauth'; scopes: Scope[]; ask: Ask[] }
+export interface TokenInfo { id: number; label: string; kind: 'token' | 'oauth'; scopes: Scope[]; ask: Ask[]; /** The instance holds a key for this connector and decrypts for it (R20). */ hosted: boolean }
 /** Who is calling: the owner in the web app (session) or an agent holding a connector token. */
 export interface Caller { user: UserRow; via: 'session' | 'token'; token?: TokenInfo }
+export const serverKeysAllowed = (env: Env) => env.ALLOW_SERVER_KEYS === '1';
 export const consumerOf = (c: Caller) => c.token ? `token:${c.token.id}` : 'session';
 export const pick = <T extends string>(v: unknown, all: readonly T[]): T[] => {
   const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[\s,]+/) : [];

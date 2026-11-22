@@ -2,8 +2,9 @@
 // protected-resource metadata (RFC 9728), authorization-server metadata (RFC 8414), dynamic client
 // registration (RFC 7591), client id metadata documents, authorization code with PKCE S256, refresh tokens.
 // A grant is a connector token made through the consent screen: same scopes, same ask rules, revoked the same way.
-import { Env, HttpError, json, nowIso, isoIn, origin, UserRow, SCOPES, ASKS, DEFAULT_ASK, pick, parseJson } from './env';
-import { createToken } from './auth';
+import { Env, HttpError, json, nowIso, isoIn, origin, UserRow, SCOPES, ASKS, DEFAULT_ASK, pick, parseJson, serverKeysAllowed, userById } from './env';
+import { createToken, revokeToken } from './auth';
+import { createServerKey } from './keys';
 import { federatedFetch } from './federation';
 import { isUrl } from '../shared/activity';
 import { b64url, hex, randomBytes, sha256 } from '../shared/enc';
@@ -130,7 +131,7 @@ export async function oauthClientInfo(env: Env, ctx: ExecutionContext, q: URLSea
   const r = await authRequest(env, ctx, k => q.get(k) ?? '');
   let redirectHost = r.redirectUri;
   try { const u = new URL(r.redirectUri); redirectHost = u.host || u.protocol; } catch { /* keep */ }
-  return { clientId: r.client.client_id, name: r.client.name, redirectUri: r.redirectUri, redirectHost, state: r.state, scopes: r.scopes, defaultAsk: DEFAULT_ASK, resource: `${origin(env)}/mcp` };
+  return { clientId: r.client.client_id, name: r.client.name, redirectUri: r.redirectUri, redirectHost, state: r.state, scopes: r.scopes, defaultAsk: DEFAULT_ASK, resource: `${origin(env)}/mcp`, serverKeys: serverKeysAllowed(env) };
 }
 
 /** The owner allowed (or denied) the request: returns where to send the browser. */
@@ -144,9 +145,12 @@ export async function oauthApprove(env: Env, ctx: ExecutionContext, u: UserRow, 
   const scopes = b.scopes === undefined ? r.scopes : pick(b.scopes, SCOPES).filter(s => r.scopes.includes(s));
   if (!scopes.length) throw new HttpError(400, 'bad_request', 'allow at least one scope');
   const ask = b.ask === undefined ? DEFAULT_ASK : pick(b.ask, ASKS);
+  // serverKey: the owner ticked "let this server decrypt for this app" on the consent screen (R20). Never a default.
+  const hosted = b.serverKey === true;
+  if (hosted && !serverKeysAllowed(env)) throw new HttpError(403, 'server_keys_disabled', 'this instance does not hold keys for connectors');
   const code = 'amz_' + b64url(randomBytes(32));
-  await env.DB.prepare('INSERT INTO oauth_codes (code_hash, user_id, client_id, client_name, redirect_uri, challenge, scopes, ask, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .bind(hex(await sha256(code)), u.id, r.client.client_id, r.client.name, r.redirectUri, r.challenge, scopes.join(' '), ask.join(' '), isoIn(CODE_SECONDS)).run();
+  await env.DB.prepare('INSERT INTO oauth_codes (code_hash, user_id, client_id, client_name, redirect_uri, challenge, scopes, ask, expires_at, hosted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(hex(await sha256(code)), u.id, r.client.client_id, r.client.name, r.redirectUri, r.challenge, scopes.join(' '), ask.join(' '), isoIn(CODE_SECONDS), hosted ? 1 : 0).run();
   back.searchParams.set('code', code);
   return { redirect: back.href };
 }
@@ -176,12 +180,18 @@ async function token(req: Request, env: Env): Promise<Response> {
   if (p.grant_type === 'authorization_code') {
     if (!p.code || !p.code_verifier) return oauthError('invalid_request', 'code and code_verifier are required');
     // Single use: the row is deleted as it is read.
-    const c = await env.DB.prepare('DELETE FROM oauth_codes WHERE code_hash = ? RETURNING *').bind(hex(await sha256(p.code))).first<{ user_id: number; client_id: string; client_name: string; redirect_uri: string; challenge: string; scopes: string; ask: string; expires_at: string }>();
+    const c = await env.DB.prepare('DELETE FROM oauth_codes WHERE code_hash = ? RETURNING *').bind(hex(await sha256(p.code))).first<{ user_id: number; client_id: string; client_name: string; redirect_uri: string; challenge: string; scopes: string; ask: string; expires_at: string; hosted: number }>();
     if (!c || c.expires_at < nowIso()) return oauthError('invalid_grant', 'the authorization code is unknown, used or expired');
     if (p.client_id !== c.client_id) return oauthError('invalid_grant', 'the code was issued to another client');
     if (p.redirect_uri && !redirectMatches(c.redirect_uri, p.redirect_uri)) return oauthError('invalid_grant', 'redirect_uri does not match the authorization request');
     if (!/^[A-Za-z0-9._~-]{43,128}$/.test(p.code_verifier) || b64url(await sha256(p.code_verifier)) !== c.challenge) return oauthError('invalid_grant', 'code_verifier does not match the code challenge');
     const t = await createToken(env, c.user_id, { kind: 'oauth', label: c.client_name, scopes: c.scopes, ask: c.ask, clientId: c.client_id });
+    if (c.hosted) {
+      // What the owner consented to. If it cannot be done (the instance switch went off meanwhile), connect nothing.
+      const owner = await userById(env, c.user_id);
+      try { await createServerKey(env, owner!, t.id, c.client_name); }
+      catch (e) { await revokeToken(env, c.user_id, t.id); return oauthError('access_denied', e instanceof HttpError ? e.message : 'could not set up the connection'); }
+    }
     await touchClient(env, c.client_id);
     return issue(env, t.id, c.client_id);
   }

@@ -28,7 +28,8 @@ async function main() {
   execSync('node scripts/build-ui.mjs', { stdio: 'inherit' });
   const probeKey = randomBytes(32);
   const logA = start(8787, '.e2e/a', { SITE_URL: A_URL, ALLOW_HTTP_LOCALHOST: '1' });
-  const logB = start(8788, '.e2e/b', { SITE_URL: B_URL, ALLOW_HTTP_LOCALHOST: '1', TEST_ROUTES: '1', TEST_PROBE_KEY: multikeyEncode('ed25519', ed25519.getPublicKey(probeKey)) });
+  // Only B lets owners opt a connector in to a server-held key, so both sides of that switch are tested.
+  const logB = start(8788, '.e2e/b', { SITE_URL: B_URL, ALLOW_HTTP_LOCALHOST: '1', ALLOW_SERVER_KEYS: '1', TEST_ROUTES: '1', TEST_PROBE_KEY: multikeyEncode('ed25519', ed25519.getPublicKey(probeKey)) });
   for (const u of [A_URL, B_URL]) await waitFor(`${u} up`, async () => (await fetch(`${u}/api/config`)).ok, 90000);
   const A = new Account(A_URL), B = new Account(B_URL), C = new Account(B_URL);
   await A.signup('alice@example.com', 'correct horse battery', 'alice', 'Alice');

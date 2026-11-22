@@ -64,7 +64,7 @@
   "files": [
     {
       "path": "spec.md",
-      "about": "Requirements R1-R19 with acceptance checks."
+      "about": "Requirements R1-R20 with acceptance checks."
     },
     {
       "path": "protocol.md",
@@ -112,7 +112,7 @@
     {
       "version": "0.2.0",
       "date": "2026-11-22",
-      "note": "Agents. Connector tokens have scopes (read, send, manage) and can no longer administer the account. Agents work on their own; what the owner marks as sensitive (first contact, approving or blocking senders, group members, or every send) and any message the agent flags is held for the owner to approve in a new Approvals screen. Each agent has its own queue position and can have its own key (am:alsoEncryptTo, am:copies); notes sent with a token carry am:agent. am:seq is assigned at send; a repeated send is answered from the first. OAuth 2.1 for /mcp. MCP: object results, annotations, thread history, 2025-11-25. Doorbell extra headers. CLI: agent file, watch, and a local MCP server with plain text tools. Unknown paths are 404 JSON; /llms.txt and /robots.txt. A 0.1 instance ignores the wire additions and still interoperates."
+      "note": "Agents. Connector tokens have scopes (read, send, manage) and can no longer administer the account. Agents work on their own; what the owner marks as sensitive (first contact, approving or blocking senders, group members, or every send) and any message the agent flags is held for the owner to approve in a new Approvals screen. Each agent has its own queue position and can have its own key (am:alsoEncryptTo, am:copies); notes sent with a token carry am:agent. am:seq is assigned at send; a repeated send is answered from the first. OAuth 2.1 for /mcp. MCP: object results, annotations, thread history, 2025-11-25. Doorbell extra headers. CLI: agent file, watch, and a local MCP server with plain text tools. Unknown paths are 404 JSON; /llms.txt and /robots.txt. On approval the owner's client seals the text it showed again for the recipients. Opt-in, off by default and stated in the actor (am:serverKeys): an instance may hold a key for one hosted connector that cannot hold one, which then gets plain-text tools. A 0.1 instance ignores the wire additions and still interoperates."
     },
     {
       "version": "0.1.3",

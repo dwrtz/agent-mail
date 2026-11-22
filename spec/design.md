@@ -46,6 +46,10 @@ Secret: `SIGNING_SEED` = base64url of 32 random bytes
 (`wrangler secret put SIGNING_SEED`). Changing it changes every user's
 signing key. Local dev reads it from `.dev.vars`.
 
+Optional var `ALLOW_SERVER_KEYS` (default off; `"1"` to allow): whether an
+owner may opt a connector in to a server-held key (R20). The example config
+sets it to `"0"`.
+
 Optional var `STREAM_SECONDS` (default `"600"`): how long an MCP server
 stream stays open. On the Workers Free plan a request may make 50 D1
 queries, so set it to `"80"` there.
@@ -139,6 +143,8 @@ ALTER TABLE api_tokens_v2 RENAME TO api_tokens;
 ALTER TABLE enc_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'primary'; /* primary | client */
 ALTER TABLE enc_keys ADD COLUMN label TEXT;
 ALTER TABLE enc_keys ADD COLUMN token_id INTEGER; /* a client key goes away with its token */
+ALTER TABLE enc_keys ADD COLUMN hosted INTEGER NOT NULL DEFAULT 0; /* 1: the instance holds the private half (R20) */
+ALTER TABLE enc_keys ADD COLUMN private_enc TEXT; /* that private key, wrapped: "<iv>.<ciphertext>", base64url */
 ALTER TABLE users ADD COLUMN key_seq INTEGER NOT NULL DEFAULT 0; /* key numbers are never reused */
 ALTER TABLE users ADD COLUMN doorbell_extra TEXT; /* JSON {"header-name":"value"} */
 ALTER TABLE drafts ADD COLUMN sent_result TEXT;   /* set once sent: a repeated send answers the same */
@@ -157,7 +163,8 @@ INSERT INTO consumer_acks (user_id, consumer, cursor) SELECT q.user_id, 'token:'
 CREATE TABLE oauth_clients (client_id TEXT PRIMARY KEY, name TEXT NOT NULL, redirect_uris TEXT NOT NULL /* JSON array */,
   source TEXT NOT NULL /* registered | metadata */, created_at TEXT NOT NULL, fetched_at TEXT NOT NULL);
 CREATE TABLE oauth_codes (code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, client_id TEXT NOT NULL, client_name TEXT NOT NULL,
-  redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, scopes TEXT NOT NULL, ask TEXT NOT NULL, expires_at TEXT NOT NULL);
+  redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, scopes TEXT NOT NULL, ask TEXT NOT NULL, expires_at TEXT NOT NULL,
+  hosted INTEGER NOT NULL DEFAULT 0 /* the owner ticked the server-key box on the consent screen */);
 CREATE TABLE oauth_tokens (access_hash TEXT PRIMARY KEY, refresh_hash TEXT NOT NULL UNIQUE, token_id INTEGER NOT NULL, client_id TEXT NOT NULL,
   access_expires_at TEXT NOT NULL, refresh_expires_at TEXT NOT NULL,
   rotated_at TEXT /* set when the refresh token was used; seeing it again ends the grant */);
@@ -227,7 +234,7 @@ name = the owner, or a token with that scope (else 403
 
 | Method and path | Who | Body / query | Answer |
 |---|---|---|---|
-| GET /api/config | (no auth) | | `{host,origin}` |
+| GET /api/config | (no auth) | | `{host,origin,serverKeys}` (`serverKeys`: the instance allows R20) |
 | POST /api/auth/signup | (no auth) | `{email,password,handle,name}` | `{ok:true}` + cookie |
 | POST /api/auth/login | (no auth) | `{email,password}` | `{ok:true}` + cookie |
 | POST /api/auth/logout | | | `{}` |
@@ -238,15 +245,15 @@ name = the owner, or a token with that scope (else 403
 | DELETE /api/keys/client/:n | owner | | `{}` |
 | PUT /api/settings | owner | `{name?,readReceipts?,doorbellUrl?,doorbellHeader?,doorbellValue?,doorbellExtra?}` (header name: trim, strip a trailing colon; header value: trim, strip a leading `<header>:` if present; `doorbellExtra`: lines of `Name: value`, `""` clears) | `{user}` |
 | POST /api/doorbell/test | owner | | `{status}` |
-| GET /api/tokens | owner | | `{tokens:[{id,label,kind,scopes,ask,created_at,last_used_at,keyId}]}` |
-| POST /api/tokens | owner | `{label,scopes?,ask?}` (scopes default to all three, ask to the default list) | `{token,id,scopes,ask}` (token shown once) |
+| GET /api/tokens | owner | | `{tokens:[{id,label,kind,scopes,ask,created_at,last_used_at,keyId,serverKey}]}` |
+| POST /api/tokens | owner | `{label,scopes?,ask?,serverKey?}` (scopes default to all three, ask to the default list; `serverKey: true` is the R20 opt-in) | `{token,id,scopes,ask}` (token shown once), plus `serverKeyId` after an opt-in; 403 `server_keys_disabled` |
 | DELETE /api/tokens/:id | owner | | `{}` |
 | PUT /api/rules, DELETE /api/rules?subject= | owner | `{subject,action}` | `{}` |
 | POST /api/approvals/:id/prepare | owner | | for a held message: `{noteId,threadId,seq,recipients:[{actor,handle,keyId,publicKey,alsoKeys}],self:{actor,keyId,publicKey,alsoKeys}}` with the recipients' keys looked up again |
 | POST /api/approvals/:id/approve | owner | for a held message `{payloads,selfPayload}`, sealed by the owner's client from the agent's copy (else 400 `reseal_required`); otherwise `{}` | `{id,status,result}`; 409 `already_decided`; 410 `approval_expired` |
 | POST /api/approvals/:id/deny | owner | | `{id,status:"denied",result:null}` |
-| GET /api/oauth/client | owner | the authorization request's query | `{clientId,name,redirectUri,redirectHost,state,scopes,defaultAsk,resource}`; 400 `invalid_request` |
-| POST /api/oauth/approve | owner | `{allow,params,scopes?,ask?}` | `{redirect}` |
+| GET /api/oauth/client | owner | the authorization request's query | `{clientId,name,redirectUri,redirectHost,state,scopes,defaultAsk,resource,serverKeys}`; 400 `invalid_request` |
+| POST /api/oauth/approve | owner | `{allow,params,scopes?,ask?,serverKey?}` (`serverKey: true` is the R20 opt-in; the key is made when the code is exchanged) | `{redirect}`; 403 `server_keys_disabled` |
 | POST /api/resolve | read | `{to:[handle or actor URL]}` | `{actors:[{actor,handle,name,inbox,keyId,publicKey,alsoKeys:[{keyId,publicKey}]}]}` |
 | GET /api/threads | read | | `[{uri,creator,members,updatedAt,unread,last:{direction,published,activity}}]` (threads holding only requests are left out) |
 | GET /api/threads/messages?uri=&limit= | read | | the newest `limit` (default and at most 500), oldest first: `[{id,direction,type,actor,activity,published,gapBefore,readAt,readBy,deliveries:[{target,status,attempts,last_error}]}]` |
@@ -306,6 +313,23 @@ a failed tool is `{"content":[{"type":"text","text":"{\"error\":...}"}],"isError
 | `change_members` | manage, held? | `{threadId, add?, remove?}` | `{members}` |
 | `list_approvals` | any | `{status?: "recent" | "pending"}` | as GET /api/approvals |
 | `cancel_approval` | any | `{id}` | `{id,status:"cancelled"}` |
+
+A token with a server-held key (R20) is listed the plain-text tools
+instead, and can call only those: `whoami` (adds `serverDecrypts: true`),
+`check_mail`, `read_inbox {limit?}` (default 20, at most 50), `ack
+{upTo?, cursors?}`, `list_threads {limit?}`, `read_thread {threadId,
+limit?}`, `list_requests`, `get_attachment {noteId, index?}` →
+`{name, mediaType, size, base64}` (at most 1 MiB), `mark_read`,
+`reply {noteId, text, sensitive?}`, `send {to? | threadId?, subject?, text,
+sensitive?}`, `approve_sender`, `block_sender`, `list_approvals
+{pendingOnly?}`, `cancel_approval {id}`. Inputs, outputs and the `message`
+shape are those of the local MCP server below; its `instructions` say that
+the owner chose to let the server open and seal mail for this connection.
+The Worker reuses the client code for this (`src/shared/client.ts`,
+`src/shared/view.ts`): it unwraps the connector's key for the request,
+opens each activity with it, and for a send prepares, seals to every
+recipient key and to the owner's, and passes the result through the same
+gate as any agent's send.
 
 `serverInfo` is `{name, title, version}` with `name` = `app_name`
 lower-cased with dashes. Annotations: the read tools are `readOnlyHint`;
@@ -454,13 +478,26 @@ Contacts, Settings, with counts) and a compact top bar on mobile (brand, then a 
   someone new; Approving or blocking a sender; Changing group members;
   Every message: the first three ticked), "Give it its own key" (ticked)
   and "Also give it my key". Adding makes the token, publishes the key and
-  shows "Download agent file" and the token, once.
+  shows "Download agent file" and the token, once. When the instance
+  allows server-held keys there is a third, amber choice, "Let this server
+  decrypt for it instead. Only for an app that cannot hold a key: the
+  server keeps a key for it and can read your mail, and what people send
+  you, for as long as the agent exists. Your public profile says that a
+  server-held key is in use." Ticking it greys out the other two; adding
+  then asks "Let this server read your mail for <name>?" and, on yes,
+  shows the MCP URL and the token (no file). Such an agent carries a
+  "server decrypts" tag in the list. The list is refreshed in place when
+  an agent is added.
 - **Connect an app** (`/oauth/authorize`): a centred card: "<name> wants to
   connect to the inbox of <address>.", where the browser will be sent
   back, that the app receives ciphertext unless it also holds a key, the
   same "Let it" and "It asks you first before" choices, Allow and Deny,
   and "You can revoke it at any time under Settings, Agents." A request
-  that cannot be used shows why and offers nothing to click.
+  that cannot be used shows why and offers nothing to click. Where the
+  instance allows server-held keys, a "Reading mail" box, unticked, offers
+  "Let this server decrypt for it" with the same warning and the same
+  second question on Allow; where it does not, a line says that an app
+  which cannot hold a key will only see encrypted mail.
 
 ## Tests
 
@@ -470,6 +507,8 @@ Contacts, Settings, with counts) and a compact top bar on mobile (brand, then a 
   addressing).
 - `tests/doorbell.test.ts`: doorbell header and value normalization and
   the extra-headers parser (R13).
+- `tests/serverkey.test.ts`: a server-held key's wrapping needs the
+  instance secret and the same key id; the actor names such keys (R20).
 - `tests/client.test.ts`: sealing to several keys: every listed key opens
   the message, no other key does, and a copy is bound to its recipient (R18).
 - `e2e/e2e.ts` (`npm run e2e`): builds the UI, starts two `wrangler dev`
@@ -485,7 +524,9 @@ Contacts, Settings, with counts) and a compact top bar on mobile (brand, then a 
   per agent, repeated sends and the agent marker, T18 client keys, T19
   OAuth, T20 doorbell extra headers, T21 the unattended loop (a doorbell
   ring, then an agent with only its agent file pulls, decrypts, replies
-  and acks, and is held on a first contact).
+  and acks, and is held on a first contact), T22 the server-held key
+  opt-in (the local run starts instance B with `ALLOW_SERVER_KEYS=1` and A
+  without, so the refusal and the feature are both exercised).
 - `e2e/cli-smoke.ts` (`npm run e2e:cli`): one local instance; the CLI
   commands as subprocesses, `watch --once`, and `agent-mail mcp` driven
   over stdio.

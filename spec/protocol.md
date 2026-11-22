@@ -72,6 +72,14 @@ Access-Control-Allow-Origin: *
 *client keys*. They come first in `keyAgreement`, so the last entry is
 always the owner's newest key. The property is absent when there are none.
 
+**(0.2)** `"am:serverKeys": ["https://a.example/users/alice#enc-3"]` names
+those client keys whose private half the actor's own instance holds,
+because the owner opted a hosted connector in to that (spec R20). It is a
+statement to correspondents: what is sealed to those keys can be read by
+that instance. Senders treat such a key like any other client key. The
+property is absent when there are none, and an instance that never holds
+encryption keys never emits it.
+
 - `assertionMethod`: Ed25519 signing keys (FEP-521a style). Multikey:
   `"z"` + base58btc(`0xed 0x01` + 32-byte public key).
 - `keyAgreement`: X25519 HPKE keys. Multikey: `"z"` + base58btc(`0xec 0x01`

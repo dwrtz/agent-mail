@@ -16,6 +16,9 @@ ALTER TABLE api_tokens_v2 RENAME TO api_tokens;
 ALTER TABLE enc_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'primary'; /* primary | client */
 ALTER TABLE enc_keys ADD COLUMN label TEXT;
 ALTER TABLE enc_keys ADD COLUMN token_id INTEGER; /* a client key goes away with its token */
+-- Opt-in: the instance holds the private half of a client key, for a hosted connector that cannot hold one.
+ALTER TABLE enc_keys ADD COLUMN hosted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE enc_keys ADD COLUMN private_enc TEXT; /* that private key, AES-256-GCM under a key derived from SIGNING_SEED */
 -- Key numbers are never reused: a sender holding an old actor document must not seal to a new key under an old id.
 ALTER TABLE users ADD COLUMN key_seq INTEGER NOT NULL DEFAULT 0;
 
@@ -43,7 +46,8 @@ INSERT INTO consumer_acks (user_id, consumer, cursor) SELECT q.user_id, 'token:'
 CREATE TABLE oauth_clients (client_id TEXT PRIMARY KEY, name TEXT NOT NULL, redirect_uris TEXT NOT NULL /* JSON array */,
   source TEXT NOT NULL /* registered | metadata */, created_at TEXT NOT NULL, fetched_at TEXT NOT NULL);
 CREATE TABLE oauth_codes (code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, client_id TEXT NOT NULL, client_name TEXT NOT NULL,
-  redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, scopes TEXT NOT NULL, ask TEXT NOT NULL, expires_at TEXT NOT NULL);
+  redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, scopes TEXT NOT NULL, ask TEXT NOT NULL, expires_at TEXT NOT NULL,
+  hosted INTEGER NOT NULL DEFAULT 0 /* the owner ticked "let this server decrypt for this app" */);
 CREATE TABLE oauth_tokens (access_hash TEXT PRIMARY KEY, refresh_hash TEXT NOT NULL UNIQUE, token_id INTEGER NOT NULL, client_id TEXT NOT NULL,
   access_expires_at TEXT NOT NULL, refresh_expires_at TEXT NOT NULL,
   rotated_at TEXT /* set when the refresh token was used: seeing it again means it leaked, and ends the grant */);

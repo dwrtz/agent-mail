@@ -6,6 +6,7 @@ import { pull, ack, listRequests, counts } from './inboxq';
 import { prepare, markRead } from './outbox';
 import { gatedSend, gatedApprove, gatedBlock, gatedMembers, listApprovals, cancelApproval, pendingApprovals } from './approvals';
 import { b64, unb64 } from '../shared/enc';
+import { HOSTED_TOOLS, HOSTED_INSTRUCTIONS, callHosted } from './hosted';
 import settings from '../../spekkr.inputs.json';
 
 const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'];
@@ -40,7 +41,8 @@ const TOOLS: Tool[] = [
   { name: 'list_approvals', title: 'List approvals', scope: null, annotations: ro, description: 'What you asked the owner to approve and how each ended: pending, approved (with the result), denied, cancelled, expired or failed.', inputSchema: obj({ status: { type: 'string', enum: ['recent', 'pending'] } }) },
   { name: 'cancel_approval', title: 'Cancel approval', scope: null, annotations: { ...local, idempotentHint: true }, description: 'Withdraw something you asked the owner to approve.', inputSchema: obj({ id: int }, ['id']) },
 ];
-const toolsFor = (c: Caller) => TOOLS.filter(t => !t.scope || !c.token || c.token.scopes.includes(t.scope));
+/** A connector the owner opted in to a server-held key gets the plain-text tools; every other caller gets the ciphertext ones. */
+const toolsFor = (c: Caller): { name: string; scope: Scope | null }[] => (c.token?.hosted ? HOSTED_TOOLS : TOOLS).filter(t => !t.scope || !c.token || c.token.scopes.includes(t.scope));
 
 const INSTRUCTIONS = `Your owner's ${settings.app_name} inbox. Message bodies are end-to-end encrypted: pull returns ciphertext that you decrypt with your key file, and you encrypt what you send (the agent-mail CLI, or its local MCP server "agent-mail mcp", does both for you). `
   + 'Work on your own: read, reply and send without asking first. Some calls answer {"status":"pending_approval"}: they wait for the owner and are carried out when the owner approves, so do not retry them or look for another way to do the same thing. '
@@ -50,9 +52,10 @@ const INSTRUCTIONS = `Your owner's ${settings.app_name} inbox. Message bodies ar
 async function callTool(env: Env, ctx: ExecutionContext, c: Caller, name: string, a: any): Promise<unknown> {
   a = a ?? {};
   const u = c.user;
-  const t = TOOLS.find(x => x.name === name);
+  const t = toolsFor(c).find(x => x.name === name) ?? (c.token?.hosted ? HOSTED_TOOLS : TOOLS).find(x => x.name === name);
   if (!t) throw new HttpError(404, 'unknown_tool', `no tool ${name}`);
   if (t.scope) requireScope(c, t.scope);
+  if (c.token?.hosted) return callHosted(env, ctx, c, name, a);
   switch (name) {
     case 'whoami': {
       const m = await meInfo(env, c);
@@ -128,7 +131,7 @@ export async function mcp(req: Request, env: Env, ctx: ExecutionContext, c: Call
       protocolVersion: v,
       capabilities: { tools: { listChanged: false }, resources: { subscribe: true, listChanged: false } },
       serverInfo: { name: SERVER_NAME, title: settings.app_name, version: SERVER_VERSION },
-      instructions: INSTRUCTIONS,
+      instructions: c.token?.hosted ? HOSTED_INSTRUCTIONS : INSTRUCTIONS,
     }, { 'mcp-session-id': sid });
   }
   const s = await session(env, req, c);

@@ -5,7 +5,7 @@ import { KeyFile, AgentFile, newKeyFile, checkKeyFile, encryptAndSend, decryptAc
 const APP = settings.app_name;
 type Me = { handle: string; name: string; email: string; actor: string; address: string; readReceipts: boolean; encKeys: { n: number; keyId: string; publicKey: string }[]; clientKeys: { n: number; keyId: string; label: string | null; tokenId: number | null }[]; doorbell: { url: string; header: string; valueSet: boolean; extra: string[] }; unread: number; unreadMessages: number; requests: number; approvals: number };
 let me: Me | null = null;
-let cfg: { host: string; origin: string } = { host: location.host, origin: location.origin };
+let cfg: { host: string; origin: string; serverKeys?: boolean } = { host: location.host, origin: location.origin };
 
 // ---------- helpers ----------
 type Child = Node | string | null | undefined | false;
@@ -324,19 +324,37 @@ async function settingsScreen() {
   // Add an agent: a token, what it may do, what it asks first, and (by default) a key of its own.
   const aerr = errBox();
   const agentOut = h('div');
+  const agentList = h('div');
+  const showAgents = (list: any[]) => agentList.replaceChildren(list.length ? h('ul', { class: 'agents' }, list.map(t => agentLine(t))) : h('p', { class: 'muted' }, 'No agents yet.'));
+  const refreshAgents = async () => { await loadMe(); showAgents((await api('/api/tokens')).tokens); };
   const label = h('input', { placeholder: 'Name, for example Claude Code', 'aria-label': 'Agent name', required: true }) as HTMLInputElement;
   const scopes = checks('It may', SCOPES, ['read', 'send']);
   const asks = checks('It asks you first before', ASKS, DEFAULT_ASK);
   const ownKey = h('input', { type: 'checkbox', checked: true }) as HTMLInputElement;
   const myKey = h('input', { type: 'checkbox' }) as HTMLInputElement;
+  // The opt-in for an app that cannot hold a key: the server keeps one for it and decrypts on its behalf.
+  const srvKey = h('input', { type: 'checkbox' }) as HTMLInputElement;
+  srvKey.addEventListener('change', () => { ownKey.disabled = myKey.disabled = srvKey.checked; });
   const mk = h('button', { type: 'submit', class: 'primary' }, 'Add agent') as HTMLButtonElement;
   const keys = loadKeys();
   const aform = h('form', { class: 'agent-form' }, h('label', {}, 'Agent name', label), scopes.el, asks.el,
     h('fieldset', { class: 'checks' }, h('legend', {}, 'Encryption'),
       h('label', { class: 'switch' }, ownKey, ' Give it its own key (it reads mail sent from now on; revoking the agent removes the key)'),
-      h('label', { class: 'switch' }, myKey, ' Also give it my key (it can read older mail too; taking that back means making yourself a new key)')),
+      h('label', { class: 'switch' }, myKey, ' Also give it my key (it can read older mail too; taking that back means making yourself a new key)'),
+      cfg.serverKeys ? h('label', { class: 'switch warn' }, srvKey, ' Let this server decrypt for it instead. Only for an app that cannot hold a key: the server keeps a key for it and can read your mail, and what people send you, for as long as the agent exists. Your public profile says that a server-held key is in use.') : null),
     aerr, mk);
   aform.addEventListener('submit', busy(mk, async () => {
+    if (srvKey.checked) {
+      if (!confirm(`Let this server read your mail for ${label.value.trim() || 'this agent'}?\n\nThe server will hold a key for it. Mail sent to you from now on can be decrypted on the server until you revoke the agent.`)) return;
+      const t = await api('/api/tokens', { body: { label: label.value, scopes: scopes.values(), ask: asks.values(), serverKey: true } });
+      await refreshAgents();
+      agentOut.replaceChildren(h('div', { class: 'card ok' },
+        h('p', {}, `Add ${cfg.origin}/mcp to the app as an MCP server with this token as "Authorization: Bearer <token>". It is not shown again.`),
+        h('code', { class: 'token' }, t.token),
+        h('p', { class: 'muted small' }, 'The server now holds a key for this agent. Revoking the agent deletes the key.')));
+      label.value = '';
+      return;
+    }
     if (!ownKey.checked && !myKey.checked) throw new Error('Without a key the agent cannot read or write anything. Tick at least one.');
     const t = await api('/api/tokens', { body: { label: label.value, scopes: scopes.values(), ask: asks.values() } });
     const file: AgentFile = { type: 'agent-mail-agent', v: 1, url: cfg.origin, token: t.token, name: label.value.trim(), keys: [] };
@@ -353,7 +371,7 @@ async function settingsScreen() {
       }
     } catch (x) { await api(`/api/tokens/${t.id}`, { method: 'DELETE' }).catch(() => {}); throw x; }
     const fileName = `${(label.value.trim() || 'agent').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.agent-mail-agent.json`;
-    await loadMe();
+    await refreshAgents();
     agentOut.replaceChildren(h('div', { class: 'card ok' },
       h('p', {}, 'Download the agent file now and give it to the agent. It holds the token and the key, and is not shown again.'),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => download(fileName, JSON.stringify(file, null, 2), 'application/json') }, 'Download agent file')),
@@ -361,17 +379,19 @@ async function settingsScreen() {
       h('code', { class: 'token' }, t.token)));
     label.value = '';
   }, aerr));
-  const agentLine = (t: any) => h('li', { class: 'agent' },
+  function agentLine(t: any): HTMLElement { return h('li', { class: 'agent' },
     h('div', {}, h('strong', {}, t.label), t.kind === 'oauth' ? h('span', { class: 'tag' }, 'connected app') : null, t.keyId ? h('span', { class: 'tag' }, `key ${t.keyId.split('#')[1]}`) : null,
+      t.serverKey ? h('span', { class: 'tag warn', title: 'The server holds this agent\'s key and can read your mail' }, 'server decrypts') : null,
       h('button', { class: 'link', onclick: async () => { if (confirm(`Revoke ${t.label}? It stops working at once.`)) { await api(`/api/tokens/${t.id}`, { method: 'DELETE' }); await loadMe(); render(); } } }, 'Revoke')),
-    h('div', { class: 'muted small' }, `${SCOPES.filter(([v]) => t.scopes.includes(v)).map(([, l]) => l.toLowerCase()).join('; ') || 'nothing'} · ${askWords(t.ask)} · created ${when(t.created_at)}${t.last_used_at ? ', last used ' + when(t.last_used_at) : ''}`));
+    h('div', { class: 'muted small' }, `${SCOPES.filter(([v]) => t.scopes.includes(v)).map(([, l]) => l.toLowerCase()).join('; ') || 'nothing'} · ${askWords(t.ask)} · created ${when(t.created_at)}${t.last_used_at ? ', last used ' + when(t.last_used_at) : ''}`)); }
+  showAgents(tokens);
   shell('Settings', form,
     h('div', { class: 'card' }, h('h2', {}, 'Encryption keys'),
       h('ul', {}, me!.encKeys.map(k => h('li', {}, k.keyId.split('#')[1], keys.some(x => x.keyId === k.keyId) ? ' · in this browser' : ' · not in this browser', k === me!.encKeys.at(-1) ? h('span', { class: 'tag' }, 'current') : null))),
       h('div', { class: 'row' }, h('button', { onclick: () => { const k = keys.find(x => x.keyId === me!.encKeys.at(-1)?.keyId); if (k) download(keyFileName(), JSON.stringify(k, null, 2), 'application/json'); } }, 'Download key file'))),
     h('div', { class: 'card' }, h('h2', {}, 'Agents'),
       h('p', { class: 'muted small' }, `Agents work on their own and ask you only about what you tick below; what they ask shows up under Approvals. Apps that support it can also connect by signing in at ${cfg.origin}/mcp.`),
-      tokens.length ? h('ul', { class: 'agents' }, tokens.map(agentLine)) : h('p', { class: 'muted' }, 'No agents yet.'),
+      agentList,
       h('h2', {}, 'Add an agent'), aform, agentOut));
 }
 
@@ -439,7 +459,7 @@ async function approvalsScreen() {
 // ---------- OAuth consent: an app asks to connect ----------
 async function consentScreen() {
   const params = Object.fromEntries(new URLSearchParams(location.search));
-  let info: { name: string; redirectHost: string; scopes: string[]; defaultAsk: string[] };
+  let info: { name: string; redirectHost: string; scopes: string[]; defaultAsk: string[]; serverKeys: boolean };
   try { info = await api(`/api/oauth/client?${new URLSearchParams(params)}`); }
   catch (e) {
     if (e instanceof ApiError && e.code === 'unauthorized') throw e;
@@ -450,8 +470,12 @@ async function consentScreen() {
   const scopes = checks('Let it', SCOPES.filter(([v]) => info.scopes.includes(v)), info.scopes.filter(s => s !== 'manage'));
   const asks = checks('It asks you first before', ASKS, info.defaultAsk);
   const allow = h('button', { class: 'primary' }, 'Allow') as HTMLButtonElement, deny = h('button', {}, 'Deny') as HTMLButtonElement;
+  // Unticked by default, and asked about once more: this is the one choice that lets the server read mail.
+  const srvKey = h('input', { type: 'checkbox' }) as HTMLInputElement;
   const go = (yes: boolean, btn: HTMLButtonElement) => busy(btn, async () => {
-    const r = await api('/api/oauth/approve', { body: { allow: yes, params, scopes: scopes.values(), ask: asks.values() } });
+    const serverKey = yes && srvKey.checked;
+    if (serverKey && !confirm(`Let this server read your mail for ${info.name}?\n\nThe server will hold a key for it. Mail sent to you from now on can be decrypted on the server until you revoke ${info.name}.`)) return;
+    const r = await api('/api/oauth/approve', { body: { allow: yes, params, scopes: scopes.values(), ask: asks.values(), serverKey } });
     location.assign(r.redirect);
   }, err);
   allow.addEventListener('click', go(true, allow));
@@ -459,7 +483,12 @@ async function consentScreen() {
   root.replaceChildren(h('div', { class: 'center' }, h('div', { class: 'card auth consent' },
     h('h1', {}, APP), h('p', {}, h('strong', {}, info.name), ' wants to connect to the inbox of ', h('strong', {}, me!.address), '.'),
     h('p', { class: 'muted small' }, `You will be sent back to ${info.redirectHost}. Messages stay encrypted: this app receives ciphertext unless it also holds one of your keys.`),
-    scopes.el, asks.el, err, h('div', { class: 'row' }, allow, deny),
+    scopes.el, asks.el,
+    info.serverKeys
+      ? h('fieldset', { class: 'checks' }, h('legend', {}, 'Reading mail'),
+          h('label', { class: 'switch warn' }, srvKey, ' Let this server decrypt for it. Only if the app cannot hold a key itself: the server then keeps a key for it and can read your mail, and what people send you, while the app stays connected. Your public profile says that a server-held key is in use.'))
+      : h('p', { class: 'muted small' }, 'This instance does not decrypt on the server, so an app that cannot hold a key will only see encrypted mail.'),
+    err, h('div', { class: 'row' }, allow, deny),
     h('p', { class: 'muted small' }, 'You can revoke it at any time under Settings, Agents.'))));
 }
 

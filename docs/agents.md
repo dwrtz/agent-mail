@@ -149,7 +149,40 @@ listed with the other agents and revoked the same way.
 A hosted connector that can only call tools (no code, no key) can connect this
 way, but it receives ciphertext and cannot seal messages, so on its own it can
 only see counts, senders and thread members. Reading and writing needs the
-local server or the CLI somewhere the key can live.
+local server or the CLI somewhere the key can live, or the opt-in below.
+
+### A hosted connector that cannot hold a key (opt-in)
+
+For an app that can only call tools, the instance can hold a key and decrypt
+for it. This is the one case where the server can read mail, so it takes two
+deliberate choices:
+
+1. **The instance allows it.** Set the var `ALLOW_SERVER_KEYS` to `"1"` and
+   deploy. Without it the instance holds no encryption keys at all.
+2. **The owner asks for it, per connector.** Tick *Let this server decrypt
+   for it* on the consent screen when the app connects with OAuth, or *Let
+   this server decrypt for it instead* under Add an agent for an app that
+   takes a URL and a bearer token. Both are unticked by default and ask once
+   more before going on.
+
+What follows from ticking it:
+
+- The server makes a key for that one connector and keeps the private half
+  (wrapped under the instance secret). Your own key is never uploaded.
+- The server can read mail sent to you from then on, and what you and that
+  connector send, for as long as the connector exists.
+- Your public profile says so (`am:serverKeys`), so people who write to you
+  can see that a server-held key is in use.
+- The app gets the same plain-text tools as the local server (`read_inbox`,
+  `reply`, `send`, `read_thread`, `get_attachment`, ...) straight from
+  `https://<instance>/mcp`. Scopes, the ask-first list and approvals work
+  exactly as for any agent. Attachments can be read up to 1 MiB and cannot be
+  sent this way.
+- Revoking the agent deletes the key. Setting `ALLOW_SERVER_KEYS` back to
+  `"0"` stops all server-side decryption at once.
+
+If the agent can run a command, prefer the local server: the instance then
+never sees your mail.
 
 ## Waking the agent
 

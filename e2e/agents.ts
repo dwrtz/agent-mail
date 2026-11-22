@@ -6,7 +6,7 @@ import { McpClient } from '../cli/src/mcp-client';
 import { main as cli } from '../cli/src/cli';
 import { encryptAndSend, decryptActivity, newKeyFile, resealHeld, Transport } from '../src/shared/client';
 import { sealNote } from '../src/shared/e2ee';
-import { unb64url } from '../src/shared/enc';
+import { unb64url, te } from '../src/shared/enc';
 import { b64, b64url, sha256, randomBytes } from '../src/shared/enc';
 import { ACTIVITY_CONTEXT } from '../src/shared/activity';
 
@@ -396,6 +396,100 @@ export async function runAgentSuite(c: Ctx): Promise<Result[]> {
     await S.api(`/api/tokens/${tok.id}`, { method: 'DELETE' });
     for (const acct of [A, B, C]) { const z = await acct.api('/api/queue?limit=100'); if (z.items.length) await acct.api('/api/queue/ack', { body: { upTo: z.items.at(-1).cursor } }); }
     return 'rang content-free; agent read with its own key, answered, acked; first contact held; no manage, no admin';
+  });
+
+  await t('T22', 'A connector that cannot hold a key gets plain text only after the owner opts in', async () => {
+    const allows = async (x: Account) => ((await (await fetch(`${x.base}/api/config`)).json()) as any).serverKeys === true;
+    const onA = await allows(A), onB = await allows(B);
+    const off = !onA ? A : !onB ? B : null;
+    if (off) {
+      const before = (await off.api('/api/tokens')).tokens.length;
+      const no = await off.api('/api/tokens', { body: { label: 'Hosted', serverKey: true }, expect: 403 });
+      assert(no.error === 'server_keys_disabled' && (await off.api('/api/tokens')).tokens.length === before, 'an instance that does not allow it must refuse, and make no token');
+    }
+    const S = onB ? B : onA ? A : null;
+    if (!S) return 'no instance here allows server-held keys: only the refusal was checked';
+    const peer = S === B ? A : B, stranger = C;
+    // Without the opt-in a connector has the ciphertext tools and nothing is said about server keys.
+    const plain = await S.agent({ label: 'No key' });
+    const plainTools: string[] = (await plain.mcp.rpc('tools/list')).tools.map((x: any) => x.name);
+    assert(plainTools.includes('pull') && !plainTools.includes('read_inbox'), 'no opt-in, no plain-text tools');
+    assert(!('am:serverKeys' in (await (await fetch(S.actor)).json() as any)), 'no server key before the opt-in');
+    assert((await bearer(S.base, plain.token, '/api/tokens', { body: { label: 'x', serverKey: true } })).status === 403, 'a token cannot opt anything in');
+    await S.api(`/api/tokens/${plain.id}`, { method: 'DELETE' });
+
+    // The owner opts one connector in.
+    const tk = await S.api('/api/tokens', { body: { label: 'Hosted', scopes: ['read', 'send'], serverKey: true } });
+    assert(tk.token && tk.serverKeyId && !('privateKey' in tk), `opt-in: ${JSON.stringify({ ...tk, token: '…' })}`);
+    const actor: any = await (await fetch(S.actor)).json();
+    assert(actor['am:serverKeys']?.includes(tk.serverKeyId) && actor['am:alsoEncryptTo']?.includes(tk.serverKeyId) && actor.keyAgreement.at(-1).id === S.keys.at(-1)!.keyId, 'the actor must say openly that a server-held key is in use, and keep the owner\'s key last');
+    assert((await S.api('/api/tokens')).tokens.find((x: any) => x.id === tk.id).serverKey === true, 'the owner sees which agent the server decrypts for');
+    const mcp = new McpClient(`${S.base}/mcp`, tk.token); await mcp.init();
+    const tools: string[] = (await mcp.rpc('tools/list')).tools.map((x: any) => x.name);
+    assert(['read_inbox', 'reply', 'send', 'read_thread', 'get_attachment'].every(x => tools.includes(x)) && !tools.includes('pull') && !tools.includes('send_message') && !tools.includes('approve_sender'), `tools: ${tools}`);
+    assert((await mcp.tool('whoami')).serverDecrypts === true, 'whoami says the server decrypts');
+    await waitFor('peer sees the server key', async () => (await peer.api('/api/resolve', { body: { to: [S.address] } })).actors[0].alsoKeys.some((k: any) => k.keyId === tk.serverKeyId), 40000);
+
+    // Mail in, with a file: the connector reads plain text without holding any key.
+    const file = te.encode('attached text\n'.repeat(20));
+    const q = await encryptAndSend(peer.apiTransport(), { to: [S.address] }, { subject: 'Hosted', text: 'Can you read this without a key of your own?', files: [{ name: 'note.txt', mediaType: 'text/plain', bytes: file }] });
+    const msg = await waitFor('plain text in read_inbox', async () => (await mcp.tool('read_inbox')).messages.find((m: any) => m.noteId === q.noteId));
+    assert(msg.text === 'Can you read this without a key of your own?' && msg.subject === 'Hosted' && msg.from === peer.address && msg.attachments[0].name === 'note.txt', `read_inbox: ${JSON.stringify(msg)}`);
+    const att = await mcp.tool('get_attachment', { noteId: q.noteId, index: 0 });
+    assert(att.base64 === b64(file) && att.name === 'note.txt', 'attachment through the server');
+    // Mail out: sealed on the server to the recipient, marked as written by an agent.
+    const r = await mcp.tool('reply', { noteId: q.noteId, text: 'Yes. The server opened it for me.' });
+    assert(r.status === 'sent', `reply: ${JSON.stringify(r)}`);
+    await mcp.tool('ack', { upTo: msg.cursor });
+    const got = await waitFor('reply at the peer', () => inQueue(peer, r.noteId));
+    const opened = await decryptActivity(peer.keys, got.activity);
+    assert(opened.content === 'Yes. The server opened it for me.' && opened.agent?.name === 'Hosted' && got.agent === true, 'the reply');
+    const hist = (await mcp.tool('read_thread', { threadId: msg.thread })).messages;
+    assert(hist.at(-1).direction === 'out' && hist.at(-1).text === 'Yes. The server opened it for me.', 'the connector reads what it sent');
+    const own = (await threadOf(S, msg.thread) as any[]).find(x => x.activity?.object?.id === r.noteId);
+    assert((await decryptActivity(S.keys, own.activity)).content === 'Yes. The server opened it for me.', 'the owner can read what the connector sent');
+    // The ask-first rules are the same: a first contact waits, and the owner approves what they read.
+    await S.api(`/api/rules?subject=${enc(stranger.actor)}`, { method: 'DELETE' });
+    const cold = await mcp.tool('send', { to: [stranger.address], subject: 'Intro', text: 'Hello from a hosted connector.' });
+    assert(cold.status === 'pending_approval' && cold.reason === 'first_contact', `first contact: ${JSON.stringify(cold)}`);
+    const item = (await S.api('/api/approvals?status=pending')).items.find((x: any) => x.id === cold.approvalId);
+    assert((await decryptActivity(S.keys, item.activity)).content === 'Hello from a hosted connector.', 'the owner reads the held message');
+    assert((await approveSend(S, item)).status === 'approved', 'approve');
+    const atStranger = await waitFor('approved message', async () => (await inQueue(stranger, cold.noteId)) || (await stranger.api('/api/requests')).items.find((x: any) => x.activity.object?.id === cold.noteId));
+    assert((await decryptActivity(stranger.keys, atStranger.activity)).content === 'Hello from a hosted connector.', 'the stranger gets it');
+    const flagged = await mcp.tool('reply', { noteId: q.noteId, text: 'I agree to the price.', sensitive: true });
+    assert(flagged.status === 'pending_approval' && flagged.reason === 'agent_flagged', 'sensitive is held here too');
+    await S.api(`/api/approvals/${flagged.approvalId}/deny`, { body: {} });
+
+    // An app that connects with OAuth: the opt-in is a box on the consent screen, unticked unless the owner ticks it.
+    const reg: any = await (await fetch(`${S.base}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Hosted App', redirect_uris: ['http://localhost:9/callback'] }) })).json();
+    const exchange = async (serverKey: boolean) => {
+      const verifier = b64url(randomBytes(32));
+      const params = { response_type: 'code', client_id: reg.client_id, redirect_uri: 'http://localhost:9/callback', code_challenge: b64url(await sha256(verifier)), code_challenge_method: 'S256', scope: 'read send' };
+      const info = await S.api(`/api/oauth/client?${new URLSearchParams(params)}`);
+      assert(info.serverKeys === true, 'the consent screen is told the instance allows it');
+      const code = new URL((await S.api('/api/oauth/approve', { body: { allow: true, params, ask: [], ...(serverKey ? { serverKey: true } : {}) } })).redirect).searchParams.get('code')!;
+      const tok: any = await (await fetch(`${S.base}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: reg.client_id }) })).json();
+      const m = new McpClient(`${S.base}/mcp`, tok.access_token); await m.init();
+      return (await m.rpc('tools/list')).tools.map((x: any) => x.name) as string[];
+    };
+    const without = await exchange(false), withKey = await exchange(true);
+    assert(without.includes('pull') && !without.includes('read_inbox'), 'consent without the box: ciphertext tools');
+    assert(withKey.includes('read_inbox') && !withKey.includes('pull'), 'consent with the box: plain-text tools');
+    if (off) {
+      const offReg: any = await (await fetch(`${off.base}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Hosted App', redirect_uris: ['http://localhost:9/callback'] }) })).json();
+      const p = { response_type: 'code', client_id: offReg.client_id, redirect_uri: 'http://localhost:9/callback', code_challenge: b64url(await sha256('x'.repeat(43))), code_challenge_method: 'S256' };
+      assert((await off.api(`/api/oauth/client?${new URLSearchParams(p)}`)).serverKeys === false, 'consent info on an instance that does not allow it');
+      assert((await off.api('/api/oauth/approve', { body: { allow: true, params: p, serverKey: true }, expect: 403 })).error === 'server_keys_disabled', 'and the opt-in is refused there');
+    }
+
+    // Taking it back: revoking the agent deletes the key and the public statement with it.
+    for (const g of (await S.api('/api/tokens')).tokens.filter((x: any) => x.label === 'Hosted' || x.label === 'Hosted App')) await S.api(`/api/tokens/${g.id}`, { method: 'DELETE' });
+    const after: any = await (await fetch(S.actor)).json();
+    assert(!('am:serverKeys' in after) && !('am:alsoEncryptTo' in after), 'revoking must remove the server-held keys');
+    assert((await bearer(S.base, tk.token, '/api/me')).status === 401, 'and end the connection');
+    for (const acct of [A, B, C]) { const z = await acct.api('/api/queue?limit=100'); if (z.items.length) await acct.api('/api/queue/ack', { body: { upTo: z.items.at(-1).cursor } }); }
+    return `${off ? 'refused where the instance forbids it; ' : ''}opted in: plain-text read, attachment, reply, same approvals; OAuth box; gone on revoke`;
   });
 
   return results;

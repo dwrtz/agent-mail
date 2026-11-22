@@ -1,5 +1,5 @@
 // Accounts, sessions and connector tokens (R2, R12).
-import { Env, HttpError, nowIso, isoIn, UserRow, origin, Caller, TokenInfo, SCOPES, ASKS, DEFAULT_ASK, Scope, Ask, pick } from './env';
+import { Env, HttpError, nowIso, isoIn, UserRow, origin, Caller, TokenInfo, SCOPES, ASKS, DEFAULT_ASK, Scope, Ask, pick, serverKeysAllowed } from './env';
 import { b64url, hex, randomBytes, sha256, te, unb64url } from '../shared/enc';
 import { HANDLE_RE } from '../shared/activity';
 
@@ -60,24 +60,26 @@ export async function logout(env: Env, req: Request) {
 
 const readCookie = (req: Request) => /(?:^|;\s*)am_session=([A-Za-z0-9_-]+)/.exec(req.headers.get('cookie') ?? '')?.[1] ?? null;
 
-interface TokenRow { id: number; user_id: number; label: string; kind: 'token' | 'oauth'; scopes: string; ask: string }
-const tokenInfo = (t: TokenRow): TokenInfo => ({ id: t.id, label: t.label, kind: t.kind, scopes: pick(t.scopes, SCOPES), ask: pick(t.ask, ASKS) });
+interface TokenRow { id: number; user_id: number; label: string; kind: 'token' | 'oauth'; scopes: string; ask: string; hosted: number }
+const tokenInfo = (t: TokenRow): TokenInfo => ({ id: t.id, label: t.label, kind: t.kind, scopes: pick(t.scopes, SCOPES), ask: pick(t.ask, ASKS), hosted: !!t.hosted });
+const HOSTED = "EXISTS (SELECT 1 FROM enc_keys e WHERE e.token_id = t.id AND e.kind = 'client' AND e.hosted = 1) AS hosted";
 
 /** Returns who is calling: an agent (bearer connector token or OAuth access token) or the owner (session cookie). */
 export async function authenticate(env: Env, req: Request): Promise<Caller | null> {
   const auth = req.headers.get('authorization');
   if (auth?.startsWith('Bearer ')) {
     const h = hex(await sha256(auth.slice(7).trim()));
-    let t = await env.DB.prepare("SELECT id, user_id, label, kind, scopes, ask FROM api_tokens WHERE token_hash = ? AND kind = 'token'").bind(h).first<TokenRow>();
+    let t = await env.DB.prepare(`SELECT t.id, t.user_id, t.label, t.kind, t.scopes, t.ask, ${HOSTED} FROM api_tokens t WHERE t.token_hash = ? AND t.kind = 'token'`).bind(h).first<TokenRow>();
     if (!t) {
-      t = await env.DB.prepare(`SELECT t.id, t.user_id, t.label, t.kind, t.scopes, t.ask FROM oauth_tokens o
+      t = await env.DB.prepare(`SELECT t.id, t.user_id, t.label, t.kind, t.scopes, t.ask, ${HOSTED} FROM oauth_tokens o
           JOIN api_tokens t ON t.id = o.token_id AND t.kind = 'oauth' AND t.client_id = o.client_id
           WHERE o.access_hash = ? AND o.access_expires_at > ? AND o.rotated_at IS NULL`).bind(h, nowIso()).first<TokenRow>();
     }
     if (!t) return null;
     await env.DB.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?').bind(nowIso(), t.id).run();
     const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(t.user_id).first<UserRow>();
-    return user && allowedEmail(env, user.email) ? { user, via: 'token', token: tokenInfo(t) } : null;
+    // With the instance switch off nothing is decrypted on the server, whatever was opted in before.
+    return user && allowedEmail(env, user.email) ? { user, via: 'token', token: { ...tokenInfo(t), hosted: !!t.hosted && serverKeysAllowed(env) } } : null;
   }
   const c = readCookie(req);
   if (!c) return null;

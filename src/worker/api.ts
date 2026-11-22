@@ -1,7 +1,7 @@
 // The owner API (design.md, "Owner API"). The owner uses it with a session; an agent's token reaches only
 // the mail operations its scopes allow, and never account administration.
-import { Env, HttpError, json, nowIso, actorUrl, addressOf, UserRow, parseJson, Caller, consumerOf, requireScope, requireSession, Scope } from './env';
-import { encKeys, clientKeys, nextKeyN } from './keys';
+import { Env, HttpError, json, nowIso, actorUrl, addressOf, UserRow, parseJson, Caller, consumerOf, requireScope, requireSession, Scope, serverKeysAllowed } from './env';
+import { encKeys, clientKeys, nextKeyN, createServerKey } from './keys';
 import { pull, ack, listRequests, setRule, counts, doorbell, unreadMessages } from './inboxq';
 import { resolveMany, prepare, markRead } from './outbox';
 import { gatedSend, gatedApprove, gatedBlock, gatedMembers, listApprovals, decideApproval, prepareApproval, cancelApproval, pendingApprovals } from './approvals';
@@ -25,10 +25,10 @@ export async function meInfo(env: Env, c: Caller) {
   };
   // An agent learns about itself and the keys mail is sealed to (all public). The email, the doorbell
   // (a webhook URL is often a secret in itself) and the other agents are the owner's to see.
-  if (c.token) return { ...base, clientKeys: keys.map(k => ({ n: k.n, keyId: `${actor}#enc-${k.n}`, publicKey: k.public_key })), token: { label: c.token.label, scopes: c.token.scopes, ask: c.token.ask } };
+  if (c.token) return { ...base, clientKeys: keys.map(k => ({ n: k.n, keyId: `${actor}#enc-${k.n}`, publicKey: k.public_key })), token: { label: c.token.label, scopes: c.token.scopes, ask: c.token.ask, serverKey: c.token.hosted } };
   return {
     ...base, email: u.email,
-    clientKeys: keys.map(k => ({ n: k.n, keyId: `${actor}#enc-${k.n}`, publicKey: k.public_key, label: k.label, tokenId: k.token_id })),
+    clientKeys: keys.map(k => ({ n: k.n, keyId: `${actor}#enc-${k.n}`, publicKey: k.public_key, label: k.label, tokenId: k.token_id, serverKey: !!k.hosted })),
     doorbell: { url: u.doorbell_url ?? '', header: u.doorbell_header ?? 'Authorization', valueSet: !!u.doorbell_value, extra: Object.keys(parseJson<Record<string, string>>(u.doorbell_extra, {})) },
   };
 }
@@ -171,12 +171,17 @@ export async function ownerApi(req: Request, env: Env, ctx: ExecutionContext, c:
     owner();
     const keys = await clientKeys(env, u.id);
     const rows = (await env.DB.prepare('SELECT id, label, kind, scopes, ask, created_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY id').bind(u.id).all<any>()).results;
-    return json({ tokens: rows.map(t => ({ ...t, scopes: String(t.scopes).split(' ').filter(Boolean), ask: String(t.ask).split(' ').filter(Boolean), keyId: (k => k ? `${actor}#enc-${k.n}` : null)(keys.find(k => k.token_id === t.id)) })) });
+    return json({ tokens: rows.map(t => { const k = keys.find(x => x.token_id === t.id); return { ...t, scopes: String(t.scopes).split(' ').filter(Boolean), ask: String(t.ask).split(' ').filter(Boolean), keyId: k ? `${actor}#enc-${k.n}` : null, serverKey: !!k?.hosted }; }) });
   }
   if (path === '/api/tokens' && m === 'POST') {
     owner();
     const b = await body(req);
-    return json(await createToken(env, u.id, { label: String(b.label ?? ''), scopes: b.scopes, ask: b.ask }));
+    // serverKey: the owner's explicit opt-in to let this instance hold a key for the connector and decrypt for it (R20).
+    if (b.serverKey === true && !serverKeysAllowed(env)) throw new HttpError(403, 'server_keys_disabled', 'this instance does not hold keys for connectors');
+    const t = await createToken(env, u.id, { label: String(b.label ?? ''), scopes: b.scopes, ask: b.ask });
+    if (b.serverKey !== true) return json(t);
+    try { return json({ ...t, serverKeyId: (await createServerKey(env, u, t.id, String(b.label ?? ''))).keyId }); }
+    catch (e) { await revokeToken(env, u.id, t.id); throw e; }
   }
   const dt = /^\/api\/tokens\/(\d+)$/.exec(path);
   if (dt && m === 'DELETE') { owner(); await revokeToken(env, u.id, Number(dt[1])); return json({}); }

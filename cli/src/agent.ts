@@ -5,6 +5,7 @@ import { basename, dirname, resolve, sep } from 'node:path';
 import { McpClient } from './mcp-client';
 import { checkKeyFile, encryptAndSend, decryptActivity, decryptAttachment, Transport, KeyFile, OutFile } from '../../src/shared/client';
 import { unb64 } from '../../src/shared/enc';
+import { MessageView, Counts, shortActor, viewActivity } from '../../src/shared/view';
 
 export interface Config { url: string; token: string; name?: string; keys: KeyFile[] }
 
@@ -50,17 +51,8 @@ export function insideDir(dir: string, p: string): string {
   return real;
 }
 
-const short = (actor: string) => { try { const u = new URL(actor); return `${u.pathname.split('/').pop()}@${u.host}`; } catch { return actor; } };
-
-/** A message as an agent wants to see it: decrypted, with who sent it and whether an agent wrote it. */
-export interface MessageView {
-  cursor?: number; kind: 'message' | 'membership'; direction: 'in' | 'out';
-  noteId: string | null; thread: string; from: string; fromActor: string; fromAgent: boolean; agentName?: string;
-  inReplyTo?: string | null; sentAt: string; subject?: string | null; text?: string | null;
-  attachments?: { index: number; name: string; mediaType: string; size: number }[];
-  event?: string; gapBefore?: number; error?: string;
-}
-export interface Counts { unread: number; requests: number; latestCursor: number; pendingApprovals: number }
+const short = shortActor;
+export type { MessageView, Counts };
 
 export class Agent {
   mcp: McpClient;
@@ -108,20 +100,7 @@ export class Agent {
   async decrypt(activity: any) { try { return await decryptActivity(this.cfg.keys, activity); } catch (e) { return { error: (e as Error).message }; } }
 
   /** Turns a stored activity into a MessageView. */
-  async view(activity: any, extra: Partial<MessageView> = {}): Promise<MessageView> {
-    const base = { direction: 'in' as const, fromActor: activity.actor, from: short(activity.actor), sentAt: activity.published, ...extra };
-    if (activity.type !== 'Create') {
-      const who = short(activity.actor), whom = short(activity.object);
-      const event = activity.object === activity.actor ? `${who} left the thread` : `${who} ${activity.type === 'Add' ? 'added' : 'removed'} ${whom}`;
-      return { ...base, kind: 'membership', noteId: null, thread: activity.target, fromAgent: false, event };
-    }
-    const n = activity.object;
-    const v: MessageView = { ...base, kind: 'message', noteId: n.id, thread: n.context, fromAgent: n['am:agent'] === true, inReplyTo: n.inReplyTo ?? null };
-    const p: any = await this.decrypt(activity);
-    if (p.error) return { ...v, error: `cannot decrypt: ${p.error}` };
-    if (p.agent?.name) v.agentName = String(p.agent.name);
-    return { ...v, subject: p.summary, text: p.content, attachments: p.attachments.map((a: any, index: number) => ({ index, name: a.name, mediaType: a.mediaType, size: a.size })) };
-  }
+  view(activity: any, extra: Partial<MessageView> = {}): Promise<MessageView> { return viewActivity(this.cfg.keys, activity, extra); }
 
   whoami() { return this.mcp.tool('whoami'); }
   counts(): Promise<Counts> { return this.mcp.resource('inbox://unread'); }
