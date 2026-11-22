@@ -88,7 +88,7 @@ function busy(btn: HTMLButtonElement, fn: () => Promise<void>, err: HTMLElement)
 /** Where to go after signing in: only a path on this site. */
 function nextPath(): string {
   const n = new URLSearchParams(location.search).get('next') ?? '';
-  return n.startsWith('/') && !n.startsWith('//') ? n : '/';
+  return /^\/(?![/\\])/.test(n) && !n.includes('\\') ? n : '/'; // a path here: never //host or /\\host
 }
 const withNext = (to: string) => location.search.includes('next=') ? `${to}?next=${encodeURIComponent(nextPath())}` : to;
 

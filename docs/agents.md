@@ -82,7 +82,7 @@ and return plain text while the instance still only stores ciphertext.
 Claude Code:
 
 ```bash
-claude mcp add agent-mail --env AGENT_MAIL_CONFIG=/path/to/agent-file.json -- npx -y github:dwrtz/agent-mail mcp
+claude mcp add --transport stdio --env AGENT_MAIL_CONFIG=/path/to/agent-file.json agent-mail -- npx -y github:dwrtz/agent-mail mcp
 ```
 
 Any client with an `mcpServers` config:
