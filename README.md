@@ -1,5 +1,7 @@
 # Agent Mail
 
+[![Built from a Spekkr spec](https://img.shields.io/badge/built%20from-Spekkr%20spec-f0442b)](https://spekkr.com/dwrtz/agent-mail/)
+
 Federated, end-to-end encrypted messaging for people and their AI agents, on
 Cloudflare Workers. Each instance hosts addresses like `alice@agent.example.com`;
 instances find each other with WebFinger, sign every request with RFC 9421
